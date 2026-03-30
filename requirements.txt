@@ -1,0 +1,21 @@
+# ODO core (required)
+pyyaml>=6.0
+
+# HTTP / web fetching
+requests>=2.31
+
+# Web content extraction (search deep-fetch)
+trafilatura>=1.8
+
+# Knowledge RAG (ChromaDB client, no server bundled)
+chromadb-client>=0.5
+
+# Tokenizers (Engram ingest/query, HuggingFace rust backend)
+tokenizers>=0.20
+
+# Numeric (engram semantic, web deep-fetch)
+numpy>=1.26
+
+# --- Optional heavy deps (uncomment if semantic few-shot is needed) ---
+# faiss-cpu>=1.8
+# sentence-transformers>=3.0

@@ -60,11 +60,53 @@ from pipeline_executor import execute_pipeline, should_use_pipeline
 # ── Config ───────────────────────────────────────────────────────────────────
 
 LISTEN_PORT = int(os.environ.get("ODO_PORT", "8084"))
+LISTEN_ADDR = os.environ.get("ODO_LISTEN", "0.0.0.0")
 LLAMA_BASE = os.environ.get("ODO_BACKEND", "http://127.0.0.1:8081")
 FORWARD_TIMEOUT = int(os.environ.get("ODO_TIMEOUT", "300"))
 
 PIPELINES_DIR = Path(__file__).parent / "pipelines"
 DB_PATH = Path.home() / ".openclaw/logs/odo.db"
+
+# ── SOUL injection ──────────────────────────────────────────────────────────
+
+SOUL_DIR = Path(os.environ.get("SOUL_DIR", str(Path.home() / ".chimere" / "soul")))
+
+_soul_cache: dict[str, tuple[str, float]] = {}  # model_name → (content, mtime)
+
+
+def load_soul(model_name: str = "default") -> str:
+    """Load SOUL.md for a given model/persona.
+
+    Lookup order:
+      1. SOUL_DIR / model_name / SOUL.md
+      2. SOUL_DIR / "default" / SOUL.md
+      3. Empty string (no SOUL injection)
+
+    Caches by file mtime — hot-reloads when the file changes on disk.
+    """
+    candidates = [
+        SOUL_DIR / model_name / "SOUL.md",
+        SOUL_DIR / "default" / "SOUL.md",
+    ]
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        cache_key = str(path)
+        cached = _soul_cache.get(cache_key)
+        if cached and cached[1] >= mtime:
+            return cached[0]
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+            _soul_cache[cache_key] = (content, mtime)
+            return content
+        except Exception as e:
+            print(f"[odo] WARNING: failed to read {path}: {e}",
+                  file=sys.stderr, flush=True)
+    return ""
 
 # ── Think Router Config ──────────────────────────────────────────────────────
 
@@ -641,6 +683,19 @@ class ODOHandler(BaseHTTPRequestHandler):
         # ── 1. Sanitize messages ──
         if "messages" in payload:
             payload["messages"] = sanitize_messages(payload["messages"])
+
+        # ── 1b. SOUL injection ──
+        # Inject SOUL.md content as prefix to the system message.
+        # Model name can be passed via odo_metadata or defaults to "default".
+        soul_model = payload.get("odo_metadata", {}).get("soul", "default")
+        soul_content = load_soul(soul_model)
+        if soul_content and "messages" in payload:
+            msgs = payload["messages"]
+            if msgs and msgs[0].get("role") == "system":
+                existing = msgs[0].get("content", "")
+                msgs[0]["content"] = f"{soul_content}\n\n{existing}" if existing else soul_content
+            else:
+                msgs.insert(0, {"role": "system", "content": soul_content})
 
         user_text = extract_user_text(payload)
         has_img = has_image(payload)
@@ -1493,10 +1548,11 @@ def main():
     init_db()
     PIPELINES_DIR.mkdir(parents=True, exist_ok=True)
 
-    server = ThreadedHTTPServer(("127.0.0.1", LISTEN_PORT), ODOHandler)
+    server = ThreadedHTTPServer((LISTEN_ADDR, LISTEN_PORT), ODOHandler)
     n_pipelines = len(list(PIPELINES_DIR.glob("*.yaml")))
 
-    print(f"[odo] listening on 127.0.0.1:{LISTEN_PORT}", flush=True)
+    soul_status = f"soul_dir={SOUL_DIR} ({'found' if SOUL_DIR.is_dir() else 'missing'})"
+    print(f"[odo] listening on {LISTEN_ADDR}:{LISTEN_PORT}", flush=True)
     print(f"[odo] backend: {LLAMA_BASE}", flush=True)
     print(f"[odo] pipelines: {n_pipelines} loaded from {PIPELINES_DIR}", flush=True)
     print(f"[odo] force_think: {FORCE_THINK}", flush=True)
@@ -1508,6 +1564,7 @@ def main():
     print(f"[odo] entropy_router: thresholds low<={THRESHOLD_LOW} high>={THRESHOLD_HIGH} "
           f"weights cx={W_COMPLEXITY} cf={W_CONFIDENCE} hx={W_HISTORY}", flush=True)
     print(f"[odo] training logging: {LOG_TRAINING_PAIRS} → {TRAINING_PAIRS_PATH}", flush=True)
+    print(f"[odo] {soul_status}", flush=True)
     print(f"[odo] stats: curl http://127.0.0.1:{LISTEN_PORT}/stats", flush=True)
     print(f"[odo] routes: curl http://127.0.0.1:{LISTEN_PORT}/routes", flush=True)
 
