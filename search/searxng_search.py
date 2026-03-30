@@ -11,10 +11,9 @@ from pathlib import Path
 
 import requests
 
-# SearXNG inside Perplexica container, exposed via Docker port mapping
-SEARXNG_URL = "http://127.0.0.1:3000"
-# Fallback: direct SearXNG if available
-SEARXNG_DIRECT_URL = "http://127.0.0.1:8080"
+# SearXNG URL: env var (Docker) or localhost fallback (bare-metal)
+SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://127.0.0.1:3000")
+SEARXNG_DIRECT_URL = os.environ.get("SEARXNG_DIRECT_URL", "http://127.0.0.1:8080")
 CACHE_DIR = Path.home() / ".chimere" / ".searxng_cache"
 CACHE_TTL_DEFAULT = 3600
 RATE_LIMIT_INTERVAL = 1.0

@@ -16,10 +16,17 @@ import json
 import sys
 from pathlib import Path
 
+import os
+
 import chromadb
-from sentence_transformers import SentenceTransformer
+
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    SentenceTransformer = None
 
 CHROMA_DIR = Path.home() / ".chimere/data/chromadb"
+CHROMADB_URL = os.environ.get("CHROMADB_URL")
 EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_RERANK_MODEL = "cross-encoder/ms-marco-multilingual-MiniLM-L-12-v2"
 
@@ -222,10 +229,14 @@ def query_rag(
 
     When hybrid=False, falls back to dense-only (original behaviour).
     """
-    if not CHROMA_DIR.exists():
+    if CHROMADB_URL:
+        from urllib.parse import urlparse
+        parsed = urlparse(CHROMADB_URL)
+        client = chromadb.HttpClient(host=parsed.hostname, port=parsed.port or 8000)
+    elif CHROMA_DIR.exists():
+        client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    else:
         return []
-
-    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
     embedder = get_embedder()
 
     query_emb = embedder.encode(

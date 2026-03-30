@@ -17,13 +17,27 @@ import time
 from pathlib import Path
 
 import chromadb
-from sentence_transformers import SentenceTransformer
+
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    SentenceTransformer = None
 
 # ── Config ────────────────────────────────────────────────────────────────────
 KNOWLEDGE_DIR = Path.home() / ".chimere/workspaces/main/knowledge"
 CHROMA_DIR = Path.home() / ".chimere/data/chromadb"
+CHROMADB_URL = os.environ.get("CHROMADB_URL")
 MANIFEST_PATH = CHROMA_DIR / "index_manifest.json"
 EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+
+
+def _get_chroma_client():
+    if CHROMADB_URL:
+        from urllib.parse import urlparse
+        parsed = urlparse(CHROMADB_URL)
+        return chromadb.HttpClient(host=parsed.hostname, port=parsed.port or 8000)
+    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+    return chromadb.PersistentClient(path=str(CHROMA_DIR))
 
 CHUNK_SIZE = 600      # chars per chunk
 CHUNK_OVERLAP = 100
@@ -170,12 +184,10 @@ def save_manifest(manifest: dict):
 
 
 def build_index(incremental: bool = False):
-    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-
     print(f"Loading embedding model: {EMBED_MODEL} (CPU)")
     embedder = SentenceTransformer(EMBED_MODEL, device="cpu")
 
-    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    client = _get_chroma_client()
     manifest = load_manifest() if incremental else {}
 
     if not incremental:
@@ -336,11 +348,11 @@ def build_index(incremental: bool = False):
 
 
 def show_stats():
-    if not CHROMA_DIR.exists():
+    if not CHROMADB_URL and not CHROMA_DIR.exists():
         print("No ChromaDB index found. Run without --stats first.")
         return
 
-    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    client = _get_chroma_client()
     for name in ["medical", "code", "chimere"]:
         try:
             coll = client.get_collection(name)

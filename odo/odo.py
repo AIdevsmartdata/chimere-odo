@@ -65,7 +65,8 @@ LLAMA_BASE = os.environ.get("ODO_BACKEND", "http://127.0.0.1:8081")
 FORWARD_TIMEOUT = int(os.environ.get("ODO_TIMEOUT", "300"))
 
 PIPELINES_DIR = Path(__file__).parent / "pipelines"
-DB_PATH = Path.home() / ".openclaw/logs/odo.db"
+_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".openclaw")))
+DB_PATH = _chimere_home / "logs/odo.db"
 
 # ── SOUL injection ──────────────────────────────────────────────────────────
 

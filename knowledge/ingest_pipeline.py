@@ -32,8 +32,8 @@ KNOWLEDGE_DIR = Path(os.path.expanduser("~/.chimere/workspaces/main/knowledge"))
 INDEX_PATH = KNOWLEDGE_DIR / "index.json"
 WHISPER_SCRIPT = os.path.expanduser("~/.chimere/bin/whisper_gpu.sh")
 VENV_PYTHON = os.path.expanduser("~/.chimere/venvs/pipeline/bin/python")
-LLM_URL = "http://127.0.0.1:8084/v1/chat/completions"
-COBALT_URL = "http://localhost:9000/"
+LLM_URL = os.environ.get("ODO_URL", os.environ.get("ODO_BACKEND", "http://127.0.0.1:8084")) + "/v1/chat/completions"
+COBALT_URL = os.environ.get("COBALT_URL", "http://localhost:9000/")
 COOKIES_FILE = os.path.expanduser("~/.chimere/cookies/youtube.txt")
 CHANNELS_YAML = KNOWLEDGE_DIR / "channels.yaml"
 
