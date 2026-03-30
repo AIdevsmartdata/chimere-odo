@@ -42,6 +42,6 @@ ENV PYTHONUNBUFFERED=1
 EXPOSE 8084
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -sf http://localhost:8084/stats || exit 1
+    CMD curl -sf http://localhost:8084/health || exit 1
 
 CMD ["python", "odo/odo.py"]

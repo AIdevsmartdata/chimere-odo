@@ -25,7 +25,25 @@ from dynamic_engram import build_dynamic_engram
 # ── Paths ────────────────────────────────────────────────────────────────────
 
 _chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
-BIN = _chimere_home / "bin"
+_app_dir = Path(__file__).resolve().parent.parent
+
+
+def _find_script(name: str) -> Path | None:
+    """Find a script in multiple locations (bare-metal bin/ or Docker app/ subdirs)."""
+    candidates = [
+        _chimere_home / "bin" / name,
+        _app_dir / "search" / name,
+        _app_dir / "knowledge" / name,
+        _app_dir / "engram" / name,
+        _app_dir / name,
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+BIN = _chimere_home / "bin" if (_chimere_home / "bin").exists() else _app_dir
 VENV_RAG = _chimere_home / "venvs" / "kine-rag" / "bin" / "python3"
 PYTHON = str(VENV_RAG) if VENV_RAG.exists() else sys.executable
 
@@ -79,8 +97,8 @@ def _run_script(args: list, timeout: int = 60, max_chars: int = 8000) -> str | N
 
 def run_rag_search(query: str, collection: str = "auto", max_results: int = 3) -> str | None:
     """Query ChromaDB knowledge base. Forces CPU to avoid GPU OOM."""
-    script = BIN / "knowledge_rag_query.py"
-    if not script.exists():
+    script = _find_script("knowledge_rag_query.py")
+    if script is None:
         return None
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": "", "SENTENCE_TRANSFORMERS_HOME": str(Path.home() / ".cache/sentence_transformers")}
     try:
@@ -103,8 +121,8 @@ def run_rag_search(query: str, collection: str = "auto", max_results: int = 3) -
 
 def run_web_search(query: str, depth: str = "quick") -> str | None:
     """Run deep_search_sota.py with specified depth."""
-    script = BIN / "deep_search_sota.py"
-    if not script.exists():
+    script = _find_script("deep_search_sota.py")
+    if script is None:
         return None
     return _run_script([PYTHON, str(script), query, "--depth", depth],
                        timeout=120, max_chars=6000)
@@ -112,8 +130,8 @@ def run_web_search(query: str, depth: str = "quick") -> str | None:
 
 def run_csv_analysis(csv_path: str) -> str | None:
     """Run analyze_csv.sh on a CSV file."""
-    script = BIN / "analyze_csv.sh"
-    if not script.exists() or not os.path.exists(csv_path):
+    script = _find_script("analyze_csv.sh")
+    if script is None or not os.path.exists(csv_path):
         return None
     return _run_script(["bash", str(script), csv_path], timeout=240)
 
@@ -140,8 +158,8 @@ def run_research(query: str, depth: str = "standard") -> str | None:
     inline enrichment). Now uses deep_search_sota.py directly which has its
     own internal caching and is bounded to ~60s for standard depth.
     """
-    script = BIN / "deep_search_sota.py"
-    if not script.exists():
+    script = _find_script("deep_search_sota.py")
+    if script is None:
         return None
     return _run_script([PYTHON, str(script), query, "--depth", depth],
                        timeout=90, max_chars=12000)

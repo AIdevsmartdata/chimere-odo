@@ -1,5 +1,7 @@
 # Chimere ODO
 
+> **Warning**: This project is under active development and may contain bugs. Use at your own risk. OpenClaw and Chimere are provided as-is with no warranty. Contributions and bug reports welcome.
+
 **Unified inference orchestrator for local LLM deployments: intent classification, adaptive compute routing, quality-gated self-improvement, and SOTA web search pipeline.**
 
 ODO sits between user requests and a local llama-server, adding intelligence layers: it classifies intent, enriches context with RAG and web search, routes to the right compute profile, and logs quality scores for nightly self-improvement.
