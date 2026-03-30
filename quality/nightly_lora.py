@@ -16,15 +16,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import random
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-DEFAULT_INPUT = Path.home() / ".chimere" / "logs" / "training_pairs.jsonl"
-QUALITY_SCORES = Path.home() / ".chimere" / "logs" / "quality_scores.jsonl"
-DEFAULT_OUTPUT = Path.home() / ".chimere" / "lora" / "latest"
+_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
+DEFAULT_INPUT = _chimere_home / "logs" / "training_pairs.jsonl"
+QUALITY_SCORES = _chimere_home / "logs" / "quality_scores.jsonl"
+DEFAULT_OUTPUT = _chimere_home / "lora" / "latest"
 MIN_RESPONSE_LEN = 50
 MIN_REASONING_LEN = 100
 MIN_QUALITY_SCORE = 4  # Only train on responses scored >= 4 by quality gate
@@ -314,7 +316,7 @@ def train_lora(
     from transformers import TrainingArguments
 
     # Use local BF16 if available (avoids re-downloading 67 GB)
-    local_bf16 = Path.home() / ".chimere" / "models" / "Qwen3.5-35B-A3B-BF16"
+    local_bf16 = _chimere_home / "models" / "Qwen3.5-35B-A3B-BF16"
     if local_bf16.exists() and (local_bf16 / "config.json").exists():
         model_name = str(local_bf16)
         print(f"  Using local BF16: {model_name}")

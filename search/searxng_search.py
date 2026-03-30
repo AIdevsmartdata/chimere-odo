@@ -14,7 +14,8 @@ import requests
 # SearXNG URL: env var (Docker) or localhost fallback (bare-metal)
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://127.0.0.1:3000")
 SEARXNG_DIRECT_URL = os.environ.get("SEARXNG_DIRECT_URL", "http://127.0.0.1:8080")
-CACHE_DIR = Path.home() / ".chimere" / ".searxng_cache"
+_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
+CACHE_DIR = _chimere_home / ".searxng_cache"
 CACHE_TTL_DEFAULT = 3600
 RATE_LIMIT_INTERVAL = 1.0
 _last_request_time = 0

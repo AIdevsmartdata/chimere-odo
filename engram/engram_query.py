@@ -53,10 +53,11 @@ def load_tokenizer():
     """Load the Qwen3.5 tokenizer. Try local paths first, then HuggingFace."""
     from tokenizers import Tokenizer
 
+    _chimere = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
     local_paths = [
-        os.path.expanduser("~/.chimere/models/Qwen3.5-35B-A3B-BF16/tokenizer.json"),
-        os.path.expanduser("~/.chimere/models/Qwen3.5-35B-A3B-GGUF/tokenizer.json"),
-        os.path.expanduser("~/.chimere/models/qwopus-27b-bf16/tokenizer.json"),
+        str(_chimere / "models" / "Qwen3.5-35B-A3B-BF16" / "tokenizer.json"),
+        str(_chimere / "models" / "Qwen3.5-35B-A3B-GGUF" / "tokenizer.json"),
+        str(_chimere / "models" / "qwopus-27b-bf16" / "tokenizer.json"),
     ]
 
     for path in local_paths:

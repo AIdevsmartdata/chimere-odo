@@ -13,17 +13,18 @@ Usage:
 """
 
 from __future__ import annotations
-import argparse, json, math, random, subprocess, time, sys
+import argparse, json, math, os, random, subprocess, time, sys
 from pathlib import Path
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model, TaskType
 
-MODEL_DIR = Path.home() / ".openclaw" / "models" / "Qwen3.5-35B-A3B-BF16"
-TRAINING_PAIRS = Path.home() / ".openclaw" / "logs" / "training_pairs.jsonl"
-QUALITY_SCORES = Path.home() / ".openclaw" / "logs" / "quality_scores.jsonl"
-OUTPUT_DIR = Path.home() / ".openclaw" / "lora" / "mezo-latest"
+_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
+MODEL_DIR = _chimere_home / "models" / "Qwen3.5-35B-A3B-BF16"
+TRAINING_PAIRS = _chimere_home / "logs" / "training_pairs.jsonl"
+QUALITY_SCORES = _chimere_home / "logs" / "quality_scores.jsonl"
+OUTPUT_DIR = _chimere_home / "lora" / "mezo-latest"
 
 
 def load_data(min_score=3):

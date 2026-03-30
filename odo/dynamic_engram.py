@@ -30,9 +30,10 @@ import time
 from pathlib import Path
 from typing import Optional
 
-ENGRAM_DIR = Path.home() / ".chimere" / "data" / "engram"
-INGEST_SCRIPT = Path.home() / ".chimere" / "bin" / "engram_ingest.py"
-TOKENIZER_PATH = Path.home() / ".chimere" / "models" / "Qwen3.5-35B-A3B-BF16" / "tokenizer.json"
+_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
+ENGRAM_DIR = _chimere_home / "data" / "engram"
+INGEST_SCRIPT = Path(__file__).resolve().parent.parent / "engram" / "engram_ingest.py"
+TOKENIZER_PATH = _chimere_home / "models" / "Qwen3.5-35B-A3B-BF16" / "tokenizer.json"
 
 # Cache: avoid rebuilding for the same query
 _cache: dict[str, tuple[str, float]] = {}  # query_hash → (engr_path, timestamp)

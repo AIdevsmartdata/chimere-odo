@@ -11,8 +11,9 @@ from pathlib import Path
 
 import requests
 
-PERPLEXICA_URL = "http://127.0.0.1:3000"
-CACHE_DIR = Path.home() / ".chimere" / ".perplexica_cache"
+PERPLEXICA_URL = os.environ.get("PERPLEXICA_URL", "http://127.0.0.1:3000")
+_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
+CACHE_DIR = _chimere_home / ".perplexica_cache"
 CACHE_TTL_DEFAULT = 3600  # 1 hour
 RATE_LIMIT_INTERVAL = 1.0  # seconds between requests
 _last_request_time = 0

@@ -229,14 +229,22 @@ def query_rag(
 
     When hybrid=False, falls back to dense-only (original behaviour).
     """
-    if CHROMADB_URL:
-        from urllib.parse import urlparse
-        parsed = urlparse(CHROMADB_URL)
-        client = chromadb.HttpClient(host=parsed.hostname, port=parsed.port or 8000)
-    elif CHROMA_DIR.exists():
-        client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    else:
+    if SentenceTransformer is None:
         return []
+
+    try:
+        if CHROMADB_URL:
+            from urllib.parse import urlparse
+            parsed = urlparse(CHROMADB_URL)
+            client = chromadb.HttpClient(host=parsed.hostname, port=parsed.port or 8000)
+        elif CHROMA_DIR.exists():
+            client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+        else:
+            return []
+    except (ValueError, Exception) as e:
+        print(f"WARNING: ChromaDB unreachable: {e}", file=sys.stderr)
+        return []
+
     embedder = get_embedder()
 
     query_emb = embedder.encode(

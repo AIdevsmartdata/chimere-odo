@@ -59,13 +59,15 @@ def _generate_candidate(
         conn = http.client.HTTPConnection(
             parsed.hostname, parsed.port, timeout=DEFAULT_TIMEOUT
         )
-        body = json.dumps(payload).encode()
-        conn.request("POST", "/v1/chat/completions", body=body, headers={
-            "Content-Type": "application/json",
-        })
-        resp = conn.getresponse()
-        data = json.loads(resp.read())
-        conn.close()
+        try:
+            body = json.dumps(payload).encode()
+            conn.request("POST", "/v1/chat/completions", body=body, headers={
+                "Content-Type": "application/json",
+            })
+            resp = conn.getresponse()
+            data = json.loads(resp.read())
+        finally:
+            conn.close()
 
         choice = data.get("choices", [{}])[0]
         content = choice.get("message", {}).get("content", "")

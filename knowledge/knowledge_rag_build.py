@@ -32,12 +32,16 @@ EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 
 
 def _get_chroma_client():
-    if CHROMADB_URL:
-        from urllib.parse import urlparse
-        parsed = urlparse(CHROMADB_URL)
-        return chromadb.HttpClient(host=parsed.hostname, port=parsed.port or 8000)
-    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-    return chromadb.PersistentClient(path=str(CHROMA_DIR))
+    try:
+        if CHROMADB_URL:
+            from urllib.parse import urlparse
+            parsed = urlparse(CHROMADB_URL)
+            return chromadb.HttpClient(host=parsed.hostname, port=parsed.port or 8000)
+        CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+        return chromadb.PersistentClient(path=str(CHROMA_DIR))
+    except (ValueError, Exception) as e:
+        print(f"WARNING: ChromaDB unreachable: {e}", file=sys.stderr)
+        return None
 
 CHUNK_SIZE = 600      # chars per chunk
 CHUNK_OVERLAP = 100
@@ -184,10 +188,18 @@ def save_manifest(manifest: dict):
 
 
 def build_index(incremental: bool = False):
+    if SentenceTransformer is None:
+        print("ERROR: sentence-transformers not installed, cannot build index")
+        return
+
     print(f"Loading embedding model: {EMBED_MODEL} (CPU)")
     embedder = SentenceTransformer(EMBED_MODEL, device="cpu")
 
     client = _get_chroma_client()
+    if client is None:
+        print("ERROR: Cannot connect to ChromaDB, aborting index build")
+        return
+
     manifest = load_manifest() if incremental else {}
 
     if not incremental:

@@ -30,12 +30,13 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-QUALITY_LOG = Path.home() / ".chimere/logs/quality_scores.jsonl"
-TRAINING_LOG = Path.home() / ".chimere/logs/training_pairs.jsonl"
-ENGRAM_DIR = Path.home() / ".chimere/data/engram"
-ARCHIVE_DIR = Path.home() / ".chimere/logs/archive"
-INGEST_SCRIPT = Path.home() / ".chimere/bin/engram_ingest.py"
-SCORER_URL = "http://127.0.0.1:8085"
+_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
+QUALITY_LOG = _chimere_home / "logs" / "quality_scores.jsonl"
+TRAINING_LOG = _chimere_home / "logs" / "training_pairs.jsonl"
+ENGRAM_DIR = _chimere_home / "data" / "engram"
+ARCHIVE_DIR = _chimere_home / "logs" / "archive"
+INGEST_SCRIPT = Path(__file__).parent / "engram_ingest.py"
+SCORER_URL = os.environ.get("SCORER_URL", "http://127.0.0.1:8085")
 
 MIN_RESPONSE_LEN = 100
 DECAY_HALF_DAYS = 30
@@ -303,7 +304,7 @@ def decay_engram_meta(dry_run: bool = False):
 
                 entries.append(entry)
             except (json.JSONDecodeError, KeyError):
-                entries.append(json.loads(line.strip()) if line.strip() else None)
+                entries.append(None)
 
     entries = [e for e in entries if e is not None]
 

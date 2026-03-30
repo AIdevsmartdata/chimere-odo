@@ -65,7 +65,7 @@ LLAMA_BASE = os.environ.get("ODO_BACKEND", "http://127.0.0.1:8081")
 FORWARD_TIMEOUT = int(os.environ.get("ODO_TIMEOUT", "300"))
 
 PIPELINES_DIR = Path(__file__).parent / "pipelines"
-_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".openclaw")))
+_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
 DB_PATH = _chimere_home / "logs/odo.db"
 
 # ── SOUL injection ──────────────────────────────────────────────────────────
@@ -144,7 +144,7 @@ CGRS_TRIGGER_IDS = {
 
 # Training pair logging
 LOG_TRAINING_PAIRS = os.environ.get("LOG_TRAINING_PAIRS", "1") == "1"
-TRAINING_PAIRS_PATH = Path.home() / ".openclaw/logs/training_pairs.jsonl"
+TRAINING_PAIRS_PATH = _chimere_home / "logs" / "training_pairs.jsonl"
 
 THINK_MIN_TOKENS = 4096
 
@@ -248,6 +248,7 @@ GREETING_RE = re.compile(
 
 _pipeline_cache: dict[str, dict] = {}
 _pipeline_mtime: dict[str, float] = {}
+_pipeline_lock = threading.Lock()
 
 
 def _load_yaml(path: Path) -> dict:
@@ -297,18 +298,19 @@ def load_pipeline(route_id: str) -> dict:
     except OSError:
         return {}
 
-    if route_id in _pipeline_cache and mtime <= _pipeline_mtime.get(route_id, 0):
-        return dict(_pipeline_cache[route_id])
+    with _pipeline_lock:
+        if route_id in _pipeline_cache and mtime <= _pipeline_mtime.get(route_id, 0):
+            return dict(_pipeline_cache[route_id])
 
-    try:
-        data = _load_yaml(yaml_path)
-        _pipeline_cache[route_id] = data
-        _pipeline_mtime[route_id] = mtime
-        return dict(data)
-    except Exception as e:
-        print(f"[odo] warning: failed to load {yaml_path}: {e}",
-              file=sys.stderr, flush=True)
-        return {}
+        try:
+            data = _load_yaml(yaml_path)
+            _pipeline_cache[route_id] = data
+            _pipeline_mtime[route_id] = mtime
+            return dict(data)
+        except Exception as e:
+            print(f"[odo] warning: failed to load {yaml_path}: {e}",
+                  file=sys.stderr, flush=True)
+            return {}
 
 
 # ── Message helpers ──────────────────────────────────────────────────────────
@@ -620,13 +622,15 @@ def _send_to_llama(payload: dict, timeout: int = 120) -> dict:
     body = json.dumps(payload).encode()
     parsed = urlparse(LLAMA_BASE)
     conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=timeout)
-    conn.request("POST", "/v1/chat/completions", body=body, headers={
-        "Content-Type": "application/json",
-        "Content-Length": str(len(body)),
-    })
-    resp = conn.getresponse()
-    data = json.loads(resp.read())
-    conn.close()
+    try:
+        conn.request("POST", "/v1/chat/completions", body=body, headers={
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+        })
+        resp = conn.getresponse()
+        data = json.loads(resp.read())
+    finally:
+        conn.close()
     return data
 
 
@@ -1021,14 +1025,17 @@ class ODOHandler(BaseHTTPRequestHandler):
             else:
                 real_payload[k] = v
 
-        # Remove internal fields
+        # Remove internal fields (not understood by llama-server)
         real_payload.pop("odo_metadata", None)
         real_payload.pop("odo_route", None)
+        for internal_key in ("engram_table", "engram_alpha", "lora"):
+            real_payload.pop(internal_key, None)
 
         # ABF for complex thinking queries
         budget_retries = 0
         complex_q = is_complex_query(user_text)
-        abf_threshold = pipeline_abf_threshold(pipeline) or ABF_THRESHOLD
+        _pab = pipeline_abf_threshold(pipeline)
+        abf_threshold = _pab if _pab is not None else ABF_THRESHOLD
         needs_abf = (ABF_ENABLED and is_thinking and complex_q and len(user_text) > 30)
 
         # DVTS: Diverse Verifier Tree Search (generate K candidates, score, return best)
@@ -1154,7 +1161,7 @@ class ODOHandler(BaseHTTPRequestHandler):
 
     def _abf_monitor(self, payload, user_text, threshold=None):
         """ABF inline monitor: stream internally, compute Ct, retry if needed."""
-        threshold = threshold or ABF_THRESHOLD
+        threshold = threshold if threshold is not None else ABF_THRESHOLD
         work_payload = dict(payload)
         work_payload["stream"] = True
         work_payload["logprobs"] = True
@@ -1210,6 +1217,11 @@ class ODOHandler(BaseHTTPRequestHandler):
 
             ct = compute_abf_certainty(logprob_entries) if logprob_entries else 0.0
 
+            # CGRS: suppress redundant reasoning when certainty is very high
+            # Must be checked BEFORE acceptance to apply logit_bias on the retry
+            if CGRS_ENABLED and ct > CGRS_DELTA:
+                work_payload["logit_bias"] = CGRS_TRIGGER_IDS
+
             accepted = False
             if ct >= threshold and reasoning_len >= ABF_MIN_THINKING_CHARS:
                 accepted = True
@@ -1240,9 +1252,6 @@ class ODOHandler(BaseHTTPRequestHandler):
             prefill = f"<think>\n{reasoning_text}\nWait, let me reconsider this step by step.\n"
             messages.append({"role": "assistant", "content": prefill})
             work_payload["messages"] = messages
-
-            if CGRS_ENABLED and ct > CGRS_DELTA:
-                work_payload["logit_bias"] = CGRS_TRIGGER_IDS
 
         return {
             "choices": [{"message": {"role": "assistant", "content": "".join(content_buf)},

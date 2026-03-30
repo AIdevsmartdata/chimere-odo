@@ -36,8 +36,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 # ── Config ──────────────────────────────────────────────────────────────────
-LISTEN_PORT = 8084
-LLAMA_BASE = "http://127.0.0.1:8081"
+LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8084"))
+LLAMA_BASE = os.environ.get("ODO_BACKEND", "http://127.0.0.1:8081")
 DB_PATH = Path.home() / ".chimere/logs/think_router.db"
 
 PROBE_MAX_TOKENS = 5

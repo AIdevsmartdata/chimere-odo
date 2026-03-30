@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -46,7 +47,7 @@ except ImportError:
 
     requests = _Requests()
 
-QWEN_URL = "http://127.0.0.1:8084/v1/chat/completions"
+QWEN_URL = os.environ.get("QWEN_URL", "http://127.0.0.1:8084/v1/chat/completions")
 TIMEOUT = 120
 
 # ── General Mode Prompts (French) ────────────────────────────────────────────

@@ -24,8 +24,9 @@ from typing import Any
 
 log = logging.getLogger("semantic_fewshot")
 
-TRAINING_PAIRS = Path.home() / ".chimere" / "logs" / "training_pairs.jsonl"
-QUALITY_SCORES = Path.home() / ".chimere" / "logs" / "quality_scores.jsonl"
+_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
+TRAINING_PAIRS = _chimere_home / "logs" / "training_pairs.jsonl"
+QUALITY_SCORES = _chimere_home / "logs" / "quality_scores.jsonl"
 MIN_QUALITY_SCORE = 3  # Was 4, too strict — only 3 entries in FAISS index
 MIN_RESPONSE_LEN = 100
 MIN_SIMILARITY = 0.30  # Cosine similarity threshold (was 0.35, too strict for sparse index)

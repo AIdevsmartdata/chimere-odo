@@ -31,16 +31,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
-_BIN = Path.home() / ".chimere" / "bin"
+_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
+_BIN = _chimere_home / "bin"
 if str(_BIN) not in sys.path:
     sys.path.insert(0, str(_BIN))
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-LLAMA_URL  = "http://127.0.0.1:8084/v1/chat/completions"
+LLAMA_URL  = os.environ.get("LLAMA_URL", "http://127.0.0.1:8084/v1/chat/completions")
 LLM_TIMEOUT = 120
-CACHE_DIR  = Path.home() / ".chimere" / ".sota_cache"
+CACHE_DIR  = _chimere_home / ".sota_cache"
 CACHE_TTL  = {"quick": 3600, "standard": 7200, "deep": 21600}
 
 DEPTH_CONFIG = {

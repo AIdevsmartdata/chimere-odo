@@ -83,6 +83,34 @@ python engram/engram_query.py ~/.chimere/data/engram/kine.engr "tendon achille"
 python search/deep_search_sota.py "latest advances in MoE quantization" --depth deep
 ```
 
+## Docker
+
+ODO is designed to run as part of the Chimere Docker stack (see
+[chimere/docker](https://github.com/AIdevsmartdata/chimere/tree/main/docker)).
+The stack's `docker-compose.yml` builds from the `Dockerfile` in this repo.
+
+To run standalone in Docker:
+
+```bash
+docker build -t chimere-odo .
+docker run -p 8084:8084 \
+  -e ODO_BACKEND=http://host.docker.internal:8081 \
+  -e SEARXNG_URL=http://host.docker.internal:8888 \
+  chimere-odo
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ODO_BACKEND` | `http://localhost:8081` | URL of the llama-server backend |
+| `ODO_PORT` | `8084` | Port ODO listens on |
+| `CHIMERE_HOME` | `/data` | Base data directory (Engram tables, logs, SOUL.md live under this path) |
+| `SOUL_DIR` | `/data/soul` | Directory containing the SOUL.md personality file |
+| `SEARXNG_URL` | `http://searxng:8080` | SearXNG endpoint for web search grounding |
+| `CHROMADB_URL` | `http://chromadb:8000` | ChromaDB endpoint for RAG vector retrieval |
+| `SCORER_URL` | *(none)* | Optional external scoring service for quality gate |
+
 ## Related repos
 
 - [chimere](https://github.com/AIdevsmartdata/chimere) — Rust inference runtime + DFlash drafter

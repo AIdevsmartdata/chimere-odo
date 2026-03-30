@@ -269,8 +269,9 @@ def classify(text: str, files: list[str] | None = None,
         {"route": str, "confidence": float, "strategy": str}
     """
     # Strategy 1b — fast-path for greetings / pure chitchat (no LLM needed)
+    # Only use fastpath for plain text without attachments
     stripped = text.strip()
-    if stripped and _GENERAL_FASTPATH.match(stripped):
+    if stripped and not files and not has_image and _GENERAL_FASTPATH.match(stripped):
         return {"route": "default", "confidence": 0.9, "strategy": "fastpath"}
 
     # Strategy 1 — keyword/regex

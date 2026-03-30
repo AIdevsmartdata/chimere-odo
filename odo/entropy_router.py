@@ -24,13 +24,15 @@ import math
 import os
 import re
 import sys
+import threading
 import time
 from collections import defaultdict
 from pathlib import Path
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
-QUALITY_SCORES_PATH = Path.home() / ".chimere/logs/quality_scores.jsonl"
+_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
+QUALITY_SCORES_PATH = _chimere_home / "logs" / "quality_scores.jsonl"
 
 # Lookback window for historical quality scores (max lines to scan from tail)
 HISTORY_LOOKBACK = 200
@@ -189,6 +191,7 @@ def _confidence_entropy(route_confidence: float) -> float:
 
 _quality_cache: dict[str, list[int]] = {}
 _quality_cache_ts: float = 0.0
+_quality_lock = threading.Lock()
 _CACHE_TTL = 300  # 5 minutes
 
 
@@ -201,41 +204,43 @@ def _load_quality_history() -> dict[str, list[int]]:
     global _quality_cache, _quality_cache_ts
 
     now = time.time()
-    if _quality_cache and (now - _quality_cache_ts) < _CACHE_TTL:
-        return _quality_cache
 
-    scores_by_route: dict[str, list[int]] = defaultdict(list)
+    with _quality_lock:
+        if _quality_cache and (now - _quality_cache_ts) < _CACHE_TTL:
+            return _quality_cache
 
-    if not QUALITY_SCORES_PATH.exists():
+        scores_by_route: dict[str, list[int]] = defaultdict(list)
+
+        if not QUALITY_SCORES_PATH.exists():
+            _quality_cache = dict(scores_by_route)
+            _quality_cache_ts = now
+            return _quality_cache
+
+        try:
+            # Read last HISTORY_LOOKBACK lines (tail of file)
+            with open(QUALITY_SCORES_PATH, 'r') as f:
+                lines = f.readlines()
+            recent = lines[-HISTORY_LOOKBACK:] if len(lines) > HISTORY_LOOKBACK else lines
+
+            for line in recent:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    route = entry.get("route", "unknown")
+                    score = entry.get("score")
+                    if isinstance(score, (int, float)):
+                        scores_by_route[route].append(int(score))
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        except Exception as e:
+            print(f"[entropy_router] warning: failed to read quality history: {e}",
+                  file=sys.stderr, flush=True)
+
         _quality_cache = dict(scores_by_route)
         _quality_cache_ts = now
         return _quality_cache
-
-    try:
-        # Read last HISTORY_LOOKBACK lines (tail of file)
-        with open(QUALITY_SCORES_PATH, 'r') as f:
-            lines = f.readlines()
-        recent = lines[-HISTORY_LOOKBACK:] if len(lines) > HISTORY_LOOKBACK else lines
-
-        for line in recent:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-                route = entry.get("route", "unknown")
-                score = entry.get("score")
-                if isinstance(score, (int, float)):
-                    scores_by_route[route].append(int(score))
-            except (json.JSONDecodeError, KeyError):
-                continue
-    except Exception as e:
-        print(f"[entropy_router] warning: failed to read quality history: {e}",
-              file=sys.stderr, flush=True)
-
-    _quality_cache = dict(scores_by_route)
-    _quality_cache_ts = now
-    return _quality_cache
 
 
 def _history_entropy(route_id: str) -> float:
@@ -267,7 +272,7 @@ def _history_entropy(route_id: str) -> float:
     elif avg >= 4.0:
         base = 0.15
     elif avg >= 3.0:
-        base = 0.35 + 0.15 * (3.0 - (avg - 3.0))  # 0.35 to 0.50
+        base = 0.50 - 0.15 * (avg - 3.0)  # 0.50 at avg=3.0, 0.35 at avg=4.0
     elif avg >= 2.0:
         base = 0.50 + 0.25 * (1.0 - (avg - 2.0))  # 0.50 to 0.75
     else:

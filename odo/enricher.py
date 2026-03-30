@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -23,8 +24,9 @@ from dynamic_engram import build_dynamic_engram
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
-BIN = Path.home() / ".openclaw/bin"
-VENV_RAG = Path.home() / ".openclaw/venvs/kine-rag/bin/python3"
+_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
+BIN = _chimere_home / "bin"
+VENV_RAG = _chimere_home / "venvs" / "kine-rag" / "bin" / "python3"
 PYTHON = str(VENV_RAG) if VENV_RAG.exists() else sys.executable
 
 # ── Pattern detection (absorbed from message_router.py) ──────────────────────
@@ -118,15 +120,17 @@ def run_csv_analysis(csv_path: str) -> str | None:
 
 def run_cyberbro(observable: str) -> str | None:
     """Run CyberBro IoC analysis."""
-    tools_dir = Path.home() / ".openclaw/agents/cyber/tools"
+    _chimere = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
+    tools_dir = _chimere / "agents" / "cyber" / "tools"
     code = (
-        f"import sys, json, time; sys.path.insert(0, '{tools_dir}'); "
-        f"from cyberbro_tool import analyze_observables, get_analysis_results; "
-        f"r = analyze_observables('{observable}'); "
-        f"time.sleep(15) if not r.get('error') else None; "
-        f"print(json.dumps(get_analysis_results(r['analysis_id']) if not r.get('error') else r, indent=2, default=str))"
+        "import sys, json, time; "
+        f"sys.path.insert(0, {str(tools_dir)!r}); "
+        "from cyberbro_tool import analyze_observables, get_analysis_results; "
+        "r = analyze_observables(sys.argv[1]); "
+        "time.sleep(15) if not r.get('error') else None; "
+        "print(json.dumps(get_analysis_results(r['analysis_id']) if not r.get('error') else r, indent=2, default=str))"
     )
-    return _run_script([sys.executable, "-c", code], timeout=60, max_chars=3000)
+    return _run_script([sys.executable, "-c", code, observable], timeout=60, max_chars=3000)
 
 
 def run_research(query: str, depth: str = "standard") -> str | None:
@@ -260,7 +264,7 @@ def inject_dynamic_engram_context(
 
 # ── Static Engram lookup (per-route .engr tables) ────────────────────────────
 
-ENGRAM_DATA_DIR = Path.home() / ".openclaw" / "data" / "engram"
+ENGRAM_DATA_DIR = _chimere_home / "data" / "engram"
 
 
 def inject_static_engram_context(
@@ -407,6 +411,7 @@ def detect_ingest(text: str) -> str | None:
 FEW_SHOT_DIR = Path(__file__).parent / "few_shot"
 _few_shot_cache: dict[str, list] = {}
 _few_shot_mtime: dict[str, float] = {}
+_few_shot_lock = threading.Lock()
 
 
 def _load_few_shot(route_id: str) -> list:
@@ -416,13 +421,14 @@ def _load_few_shot(route_id: str) -> list:
         return []
     try:
         mtime = json_path.stat().st_mtime
-        if route_id in _few_shot_cache and mtime <= _few_shot_mtime.get(route_id, 0):
-            return _few_shot_cache[route_id]
-        with open(json_path) as f:
-            examples = json.load(f)
-        _few_shot_cache[route_id] = examples
-        _few_shot_mtime[route_id] = mtime
-        return examples
+        with _few_shot_lock:
+            if route_id in _few_shot_cache and mtime <= _few_shot_mtime.get(route_id, 0):
+                return _few_shot_cache[route_id]
+            with open(json_path) as f:
+                examples = json.load(f)
+            _few_shot_cache[route_id] = examples
+            _few_shot_mtime[route_id] = mtime
+            return examples
     except Exception:
         return []
 

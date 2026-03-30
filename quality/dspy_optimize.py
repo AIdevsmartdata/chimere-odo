@@ -28,7 +28,8 @@ from pathlib import Path
 
 # Use nothink proxy (8086) to avoid wasting think tokens during optimization
 LLM_URL = os.environ.get("DSPY_LLM_URL", "http://127.0.0.1:8086/v1")
-PIPELINES_DIR = Path.home() / ".chimere/odo/pipelines"
+_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
+PIPELINES_DIR = _chimere_home / "odo" / "pipelines"
 OUTPUT_DIR = Path("/tmp/dspy_optimized")
 
 # ── Eval datasets per domain ────────────────────────────────────────────────
@@ -106,7 +107,7 @@ DATASETS = {
 }
 
 
-EXTERNAL_DATASETS_DIR = Path.home() / ".chimere/data/dspy_datasets"
+EXTERNAL_DATASETS_DIR = _chimere_home / "data" / "dspy_datasets"
 
 
 def _load_external_pairs(domain: str, max_pairs: int = 50) -> list[tuple[str, str]]:

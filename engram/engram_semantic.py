@@ -23,12 +23,13 @@ import struct
 import numpy as np
 from pathlib import Path
 
-SEMANTIC_DIR = Path.home() / ".chimere/data/engram/semantic"
+_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
+SEMANTIC_DIR = _chimere_home / "data" / "engram" / "semantic"
 INDEX_FILE = SEMANTIC_DIR / "faiss.index"
 META_FILE = SEMANTIC_DIR / "meta.jsonl"
 EMBEDDING_DIM = 384  # gte-small default, upgrade to 2048 with 35B embeddings later
-QUALITY_LOG = Path.home() / ".chimere/logs/quality_scores.jsonl"
-TRAINING_LOG = Path.home() / ".chimere/logs/training_pairs.jsonl"
+QUALITY_LOG = _chimere_home / "logs" / "quality_scores.jsonl"
+TRAINING_LOG = _chimere_home / "logs" / "training_pairs.jsonl"
 
 
 def get_embedding(text: str, dim: int = EMBEDDING_DIM) -> np.ndarray:

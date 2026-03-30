@@ -30,7 +30,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 LLAMA_BASE = os.environ.get("ODO_BACKEND", "http://127.0.0.1:8081")
-QUALITY_LOG = Path.home() / ".chimere/logs/quality_scores.jsonl"
+_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
+QUALITY_LOG = _chimere_home / "logs" / "quality_scores.jsonl"
+_log_lock = threading.Lock()
 
 # ThinkPRM configuration
 THINKPRM_BASE = os.environ.get("THINKPRM_BACKEND", "http://127.0.0.1:8085")
@@ -148,8 +150,9 @@ def _score_and_log(user_text: str, response_text: str, route_id: str,
                 print(f"[quality] thinkprm error: {e}", file=sys.stderr, flush=True)
 
         QUALITY_LOG.parent.mkdir(parents=True, exist_ok=True)
-        with open(QUALITY_LOG, "a") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        with _log_lock:
+            with open(QUALITY_LOG, "a") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
         tag = "GOOD" if score >= 4 else "BAD" if score <= 2 else "OK"
         print(f"[quality] {tag} score={score} route={route_id} reason={reason[:80]}",
@@ -196,13 +199,15 @@ def _call_scorer(user_text: str, response_text: str) -> tuple[int, str]:
     body = json.dumps(payload).encode()
     parsed = urlparse(LLAMA_BASE)
     conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=30)
-    conn.request("POST", "/v1/chat/completions", body=body, headers={
-        "Content-Type": "application/json",
-        "Content-Length": str(len(body)),
-    })
-    resp = conn.getresponse()
-    data = json.loads(resp.read())
-    conn.close()
+    try:
+        conn.request("POST", "/v1/chat/completions", body=body, headers={
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+        })
+        resp = conn.getresponse()
+        data = json.loads(resp.read())
+    finally:
+        conn.close()
 
     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
@@ -306,13 +311,15 @@ def _call_thinkprm(user_text: str, response_text: str,
     body = json.dumps(payload).encode()
     parsed = urlparse(THINKPRM_BASE)
     conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=60)
-    conn.request("POST", "/v1/chat/completions", body=body, headers={
-        "Content-Type": "application/json",
-        "Content-Length": str(len(body)),
-    })
-    resp = conn.getresponse()
-    data = json.loads(resp.read())
-    conn.close()
+    try:
+        conn.request("POST", "/v1/chat/completions", body=body, headers={
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+        })
+        resp = conn.getresponse()
+        data = json.loads(resp.read())
+    finally:
+        conn.close()
 
     msg = data.get("choices", [{}])[0].get("message", {})
     reasoning = msg.get("reasoning_content", "")
@@ -450,13 +457,15 @@ def reflect_and_retry(user_text: str, bad_response: str, reason: str) -> str | N
         body = json.dumps(payload).encode()
         parsed = urlparse(LLAMA_BASE)
         conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=120)
-        conn.request("POST", "/v1/chat/completions", body=body, headers={
-            "Content-Type": "application/json",
-            "Content-Length": str(len(body)),
-        })
-        resp = conn.getresponse()
-        data = json.loads(resp.read())
-        conn.close()
+        try:
+            conn.request("POST", "/v1/chat/completions", body=body, headers={
+                "Content-Type": "application/json",
+                "Content-Length": str(len(body)),
+            })
+            resp = conn.getresponse()
+            data = json.loads(resp.read())
+        finally:
+            conn.close()
 
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         if content and len(content) > 50:
