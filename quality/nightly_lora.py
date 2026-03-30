@@ -369,6 +369,10 @@ def train_lora(
         """Format ShareGPT conversations into chat template strings."""
         texts = []
         for convos in examples["conversations"]:
+            # HF Dataset may serialize nested dicts as strings
+            if isinstance(convos, str):
+                import json
+                convos = json.loads(convos)
             messages = []
             for turn in convos:
                 role = "user" if turn["from"] == "human" else "assistant"
