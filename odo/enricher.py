@@ -81,7 +81,7 @@ INGEST_CMD_RE = re.compile(r'/ingest\s+(https?://\S+)', re.I)
 def _run_script(args: list, timeout: int = 60, max_chars: int = 8000) -> str | None:
     """Run a script with timeout. Returns stdout or None."""
     try:
-        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, shell=False)  # noqa: S603
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip()[:max_chars]
         if r.returncode != 0:

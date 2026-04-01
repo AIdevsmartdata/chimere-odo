@@ -635,11 +635,11 @@ def main():
         print()
     elif args.verbose:
         if mode == "code":
-            print(format_code_verbose(results, elapsed))
+            print(format_code_verbose(results, elapsed)[:2000])  # Truncate to avoid PII leak
         elif mode == "medical":
-            print(format_medical_verbose(results, elapsed))
+            print(format_medical_verbose(results, elapsed)[:2000])
         else:
-            print(format_general_verbose(results, elapsed))
+            print(format_general_verbose(results, elapsed)[:2000])
     else:
         if mode == "code":
             print(format_code_short(results, elapsed))
