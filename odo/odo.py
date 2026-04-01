@@ -60,7 +60,7 @@ from pipeline_executor import execute_pipeline, should_use_pipeline
 # ── Config ───────────────────────────────────────────────────────────────────
 
 LISTEN_PORT = int(os.environ.get("ODO_PORT", "8084"))
-LISTEN_ADDR = os.environ.get("ODO_LISTEN", "0.0.0.0")
+LISTEN_ADDR = os.environ.get("ODO_LISTEN", "127.0.0.1")
 LLAMA_BASE = os.environ.get("ODO_BACKEND", "http://127.0.0.1:8081")
 FORWARD_TIMEOUT = int(os.environ.get("ODO_TIMEOUT", "300"))
 
