@@ -1,0 +1,22 @@
+[Unit]
+Description=Chimère MCP server — tools bridge (RAG, engram, deep-search, OCR, think)
+Documentation=https://modelcontextprotocol.io
+After=network.target
+# odo.service is the main client; start before it so tools are ready
+Before=odo.service
+
+[Service]
+Type=simple
+ExecStart=/home/remondiere/.openclaw/venvs/kine-rag/bin/python /home/remondiere/.openclaw/mcp/chimere-mcp.py --host 127.0.0.1 --port 9095 --transport streamable-http
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+Environment=CHIMERE_MCP_LOG=INFO
+# Security: localhost only, no exposed network port
+# Client side: ODO pre_act.py uses chimere.think tool locally
+WorkingDirectory=/home/remondiere/.openclaw
+
+[Install]
+WantedBy=default.target
