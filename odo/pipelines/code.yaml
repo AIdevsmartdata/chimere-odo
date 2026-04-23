@@ -1,7 +1,7 @@
 description: Software development and debugging
 engram:
   alpha: 0.3
-  table: ~/.chimere/data/engram/code.engr
+  table: ~/.openclaw/data/engram/code.engr
 grammar: null
 lora:
   path: null
@@ -46,3 +46,6 @@ tools_allowed:
 - web_search
 - file_read
 - file_write
+# Anthropic think tool: invisible scratchpad (+54% policy adherence).
+# Useful for code to verify edge cases before writing.
+- think
