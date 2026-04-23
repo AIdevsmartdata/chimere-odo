@@ -22,6 +22,15 @@ thinking:
   budget: 8192          # maximal reasoning budget
   abf_threshold: 0.0    # ABF disabled -- always think fully
 
+# Pre-Act planner (arXiv 2505.09970): the scout/analyze/write pipeline already
+# is multi-step but a top-level plan helps the scout know what to search FIRST.
+# Cost: ~500ms. Gain on long-horizon research: +7pp completion.
+pre_act:
+  enabled: true
+  planner_max_tokens: 512
+  planner_temp: 0.3
+  planner_timeout: 25
+
 # System prompt (prepended to user's system message)
 system_prompt: |
   You are a research analyst producing structured, citation-backed reports.
@@ -33,7 +42,7 @@ system_prompt: |
 
 # Engram table (WRITE mode -- ingest search results into engram)
 engram:
-  table: "~/.chimere/data/engram/general.engr"
+  table: "~/.openclaw/data/engram/general.engr"
   alpha: 0.2
   mode: "write"  # ingest discovered n-grams from search results
 
@@ -45,9 +54,12 @@ lora:
 grammar: null
 
 # Tools allowed
-tools_allowed: ["web_search"]
+# `think`: invisible scratchpad (Anthropic think tool, +54% policy adherence)
+tools_allowed: ["web_search", "think"]
 
 # Multi-agent pipeline steps (sequential)
+# pipeline_auto=true → run in quality mode too, not just ultra
+pipeline_auto: true
 pipeline:
   - agent: "scout"
     params: { temperature: 0.5, max_tokens: 4096 }

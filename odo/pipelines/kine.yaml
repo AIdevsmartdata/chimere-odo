@@ -22,6 +22,15 @@ thinking:
   budget: 2048          # was 4096 — caused >150s timeouts on complex kine questions
   abf_threshold: 0.55   # was 0.7 — tighter ABF to cut thinking sooner when confident
 
+# Pre-Act planner (arXiv 2505.09970): produce a short numbered plan in no-think
+# mode BEFORE the main (thinking) generation. +7pp task completion vs ReAct.
+# See odo/pre_act.py for implementation.
+pre_act:
+  enabled: true
+  planner_max_tokens: 384   # plans are 3-5 lines; 384 is plenty
+  planner_temp: 0.3         # low temp → deterministic plan
+  planner_timeout: 20
+
 # System prompt (prepended to user's system message)
 system_prompt: |
   You are a clinical physiotherapy assistant grounded in evidence-based practice.
@@ -40,20 +49,23 @@ dvts:
 
 # Engram table (domain-specific n-grams)
 engram:
-  table: "~/.chimere/data/engram/kine.engr"
+  table: "~/.openclaw/data/engram/kine.engr"
   alpha: 0.35
 
 # LoRA adapter (hot-swap)
 lora:
-  path: null  # will be "~/.chimere/loras/kine-r16/" after clinical fine-tune
+  path: null  # will be "~/.openclaw/loras/kine-r16/" after clinical fine-tune
 
 # Grammar constraint
 grammar: null
 
 # Tools allowed
-tools_allowed: ["web_search", "calculator"]
+# `think`: invisible scratchpad (Anthropic think tool, +54% policy adherence)
+tools_allowed: ["web_search", "calculator", "think"]
 
 # Multi-agent pipeline steps (sequential)
+# pipeline_auto=true → run in quality mode too, not just ultra
+pipeline_auto: true
 pipeline:
   - agent: "evidence_search"
     params: { temperature: 0.3, max_tokens: 2048 }
