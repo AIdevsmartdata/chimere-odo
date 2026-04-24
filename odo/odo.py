@@ -138,6 +138,9 @@ LISTEN_PORT = int(os.environ.get("ODO_PORT", "8084"))
 LLAMA_BASE = os.environ.get("ODO_BACKEND", "http://127.0.0.1:8081")
 FORWARD_TIMEOUT = int(os.environ.get("ODO_TIMEOUT", "300"))
 
+# Process start time — /v1/status reports uptime since boot.
+ODO_STARTUP_TS = time.time()
+
 PIPELINES_DIR = Path(__file__).parent / "pipelines"
 DB_PATH = Path.home() / ".openclaw/logs/odo.db"
 
@@ -1208,8 +1211,62 @@ class ODOHandler(BaseHTTPRequestHandler):
                     },
                 ],
             })
+        elif self.path == "/v1/status":
+            # Aggregate status — one call for Studio/monitoring: ODO health +
+            # upstream chimere-server health + pipeline/skill counts + uptime.
+            # Never raises — missing upstream = upstream: {"ok": false, ...}.
+            self._json_response(200, self._build_status())
         else:
             self.send_error(404)
+
+    def _build_status(self) -> dict:
+        uptime = int(time.time() - ODO_STARTUP_TS)
+
+        # Upstream probe (chimere-server /health). Short timeout so monitors
+        # don't hang when the backend is mid-restart.
+        upstream: dict = {"url": LLAMA_BASE, "ok": False}
+        try:
+            parsed = urlparse(LLAMA_BASE)
+            conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=1.0)
+            conn.request("GET", "/health")
+            resp = conn.getresponse()
+            raw = resp.read()
+            conn.close()
+            if resp.status == 200:
+                try:
+                    upstream.update(json.loads(raw))
+                except Exception:
+                    upstream["raw"] = raw.decode("utf-8", "replace")[:200]
+                upstream["ok"] = True
+            else:
+                upstream["http_status"] = resp.status
+        except Exception as e:
+            upstream["error"] = f"{type(e).__name__}: {e}"
+
+        # Pipeline / skill inventory (filesystem, no process calls).
+        n_pipelines = len(list(PIPELINES_DIR.glob("*.yaml"))) if PIPELINES_DIR.exists() else 0
+        n_skills = 0
+        if _SKILLS_OK:
+            try:
+                n_skills = len(_skills_list_json().get("skills", []))  # type: ignore[arg-type]
+            except Exception:
+                n_skills = 0
+
+        return {
+            "status": "ok",
+            "engine": "odo-unified",
+            "uptime_seconds": uptime,
+            "listen": {"host": "127.0.0.1", "port": LISTEN_PORT},
+            "upstream": upstream,
+            "capabilities": {
+                "force_think": FORCE_THINK,
+                "abf_enabled": ABF_ENABLED,
+                "cgrs_enabled": CGRS_ENABLED,
+                "pipelines": n_pipelines,
+                "skills": n_skills,
+                "thinkprm_shadow": os.environ.get("THINKPRM_SHADOW", "0") == "1",
+            },
+        }
 
     def do_POST(self):
         # ── Security gate (H1 auth, H2 rate limit) ──
