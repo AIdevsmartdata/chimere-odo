@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# =============================================================================
+# chimere-cli — terminal client for the Chimère stack
+#
+# Thin wrapper over ODO (default :8084) and chimere-server (default :8081) that
+# gives you `status`, `chat`, `routes`, `models`, `skills`, `stream` without
+# hand-rolling curl. Works with any OpenAI-compatible backend because under the
+# hood it just POSTs /v1/chat/completions.
+#
+# Requires: curl, jq. Nothing else.
+# =============================================================================
+
+set -euo pipefail
+
+CHIMERE_ODO="${CHIMERE_ODO:-http://127.0.0.1:8084}"
+CHIMERE_SERVER="${CHIMERE_SERVER:-http://127.0.0.1:8081}"
+CHIMERE_MODEL="${CHIMERE_MODEL:-chimere-deltanet}"
+CHIMERE_USER="${CHIMERE_USER:-${USER:-anonymous}}"
+CHIMERE_TIMEOUT="${CHIMERE_TIMEOUT:-120}"
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || { echo "chimere-cli: missing '$1'" >&2; exit 127; }
+}
+need curl
+need jq
+
+usage() {
+  cat <<'HELP_END'
+chimere-cli — terminal client for the Chimère stack
+
+Usage:
+  chimere-cli status                         # ODO /v1/status (aggregate)
+  chimere-cli health                         # raw /health on both daemons
+  chimere-cli models                         # list models (via ODO /v1/models)
+  chimere-cli routes                         # ODO active routes
+  chimere-cli skills [text]                  # list skills, or match a text
+  chimere-cli stats                          # ODO 24h stats
+  chimere-cli chat "prompt"   [--route X --think --no-think --max N --json]
+  chimere-cli stream "prompt" [flags]        # same flags as chat, tokens as they arrive
+  chimere-cli raw METHOD PATH [body]         # low-level: curl against ODO
+
+Flags for chat / stream:
+  --route R        force x-odo-route (code, kine, cyber, research, default, general, ...)
+  --think          force thinking on  (chat_template_kwargs.enable_thinking=true)
+  --no-think       force thinking off
+  --max N          max_tokens (default 512)
+  --system FILE    prepend a system message read from FILE
+  --json           print the raw JSON reply (chat only)
+  --direct         bypass ODO, call chimere-server :8081 directly
+
+Environment:
+  CHIMERE_ODO      default http://127.0.0.1:8084
+  CHIMERE_SERVER   default http://127.0.0.1:8081
+  CHIMERE_MODEL    default chimere-deltanet
+  CHIMERE_USER     default $USER
+  CHIMERE_TIMEOUT  default 120 seconds
+HELP_END
+}
+
+curl_get() {
+  curl -sS --max-time "$CHIMERE_TIMEOUT" "$1"
+}
+
+cmd_status() {
+  curl_get "$CHIMERE_ODO/v1/status" | jq .
+}
+
+cmd_health() {
+  echo "odo:"
+  curl_get "$CHIMERE_ODO/health" | jq .
+  echo "chimere-server:"
+  curl_get "$CHIMERE_SERVER/health" | jq .
+}
+
+cmd_models() {
+  curl_get "$CHIMERE_ODO/v1/models" | jq .
+}
+
+cmd_routes() {
+  curl_get "$CHIMERE_ODO/routes" | jq .
+}
+
+cmd_skills() {
+  if [[ $# -eq 0 ]]; then
+    curl_get "$CHIMERE_ODO/skill/list" | jq '{count, skills: [.skills[] | {name, description}]}'
+  else
+    local text="$*"
+    curl -sS --max-time "$CHIMERE_TIMEOUT" --get \
+      --data-urlencode "text=$text" "$CHIMERE_ODO/skill/match" | jq .
+  fi
+}
+
+cmd_stats() {
+  curl_get "$CHIMERE_ODO/stats" | jq .
+}
+
+# Build a chat request body on stdout. Args: prompt, route, think, max, system_file, json_raw.
+# Non-input-relevant; used by cmd_chat and cmd_stream.
+build_body() {
+  local prompt="$1" route="$2" think="$3" max="$4" system_file="$5" stream_flag="$6"
+  local system_msg=""
+  if [[ -n "$system_file" ]]; then
+    if [[ ! -f "$system_file" ]]; then
+      echo "chimere-cli: system file not found: $system_file" >&2
+      exit 1
+    fi
+    system_msg="$(cat "$system_file")"
+  fi
+  local think_json
+  case "$think" in
+    on)   think_json='{"enable_thinking": true}' ;;
+    off)  think_json='{"enable_thinking": false}' ;;
+    auto) think_json='null' ;;
+  esac
+  jq -n \
+    --arg prompt   "$prompt" \
+    --arg model    "$CHIMERE_MODEL" \
+    --arg user     "$CHIMERE_USER" \
+    --arg route    "$route" \
+    --arg sysmsg   "$system_msg" \
+    --argjson think  "$think_json" \
+    --argjson max    "$max" \
+    --argjson stream "$stream_flag" \
+    '
+    def msgs:
+      if $sysmsg == "" then
+        [{ role: "user", content: $prompt }]
+      else
+        [ { role: "system", content: $sysmsg },
+          { role: "user",   content: $prompt } ]
+      end;
+    {
+      model: $model,
+      user: $user,
+      messages: msgs,
+      max_tokens: $max,
+      stream: ($stream | .),
+    }
+    | if $think == null then . else . + { chat_template_kwargs: $think } end
+    | if $route == "" then . else . + { "x_odo_route": $route } end
+    '
+}
+
+do_chat_common() {
+  local subcmd="$1"; shift
+  local prompt="" route="" think="auto" max=512 system_file="" json_raw=0 direct=0
+
+  if [[ $# -eq 0 || "$1" == "--help" ]]; then usage; exit 0; fi
+  prompt="$1"; shift || true
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --route)    route="$2"; shift 2 ;;
+      --think)    think="on"; shift ;;
+      --no-think) think="off"; shift ;;
+      --max)      max="$2"; shift 2 ;;
+      --system)   system_file="$2"; shift 2 ;;
+      --json)     json_raw=1; shift ;;
+      --direct)   direct=1; shift ;;
+      *)          echo "chimere-cli: unknown flag: $1" >&2; exit 2 ;;
+    esac
+  done
+
+  local endpoint_base="$CHIMERE_ODO"
+  (( direct )) && endpoint_base="$CHIMERE_SERVER"
+  local stream_flag=false
+  [[ "$subcmd" == "stream" ]] && stream_flag=true
+  local body
+  body="$(build_body "$prompt" "$route" "$think" "$max" "$system_file" "$stream_flag")"
+
+  if [[ "$subcmd" == "stream" ]]; then
+    # Server-sent events: strip "data: " prefix, skip [DONE], pull .choices[0].delta.content
+    curl -sS --no-buffer --max-time "$CHIMERE_TIMEOUT" \
+      "$endpoint_base/v1/chat/completions" \
+      -H 'Content-Type: application/json' \
+      -d "$body" \
+      | awk '/^data: /{sub(/^data: /,""); if ($0 != "[DONE]") print $0}' \
+      | while IFS= read -r line; do
+          echo "$line" | jq -r '.choices[0].delta.content // .choices[0].delta.reasoning_content // empty' 2>/dev/null
+        done
+    echo ""
+    return 0
+  fi
+
+  local reply
+  reply="$(curl -sS --max-time "$CHIMERE_TIMEOUT" \
+    "$endpoint_base/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d "$body")"
+  if (( json_raw )); then
+    echo "$reply" | jq .
+  else
+    echo "$reply" | jq -r '.choices[0].message.content // .error.message // "<empty reply>"'
+  fi
+}
+
+cmd_chat()   { do_chat_common chat "$@"; }
+cmd_stream() { do_chat_common stream "$@"; }
+
+cmd_raw() {
+  local method="$1" path="$2"; shift 2 || true
+  local body="${1:-}"
+  if [[ -n "$body" ]]; then
+    curl -sS --max-time "$CHIMERE_TIMEOUT" -X "$method" \
+      "$CHIMERE_ODO$path" -H 'Content-Type: application/json' -d "$body"
+  else
+    curl -sS --max-time "$CHIMERE_TIMEOUT" -X "$method" "$CHIMERE_ODO$path"
+  fi
+  echo ""
+}
+
+# -----------------------------------------------------------------------------
+
+if [[ $# -eq 0 ]]; then usage; exit 0; fi
+sub="$1"; shift
+case "$sub" in
+  status)  cmd_status  "$@" ;;
+  health)  cmd_health  "$@" ;;
+  models)  cmd_models  "$@" ;;
+  routes)  cmd_routes  "$@" ;;
+  skills)  cmd_skills  "$@" ;;
+  stats)   cmd_stats   "$@" ;;
+  chat)    cmd_chat    "$@" ;;
+  stream)  cmd_stream  "$@" ;;
+  raw)     cmd_raw     "$@" ;;
+  -h|--help|help) usage ;;
+  *) echo "chimere-cli: unknown subcommand: $sub" >&2; usage >&2; exit 2 ;;
+esac

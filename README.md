@@ -112,9 +112,34 @@ cyber, research, default, vision, doc_qa, general).
 ## Stats + routes
 
 ```bash
-curl http://127.0.0.1:8084/stats    # request counters, routes, latency
-curl http://127.0.0.1:8084/routes   # active routing rules
+curl http://127.0.0.1:8084/stats       # request counters, routes, latency
+curl http://127.0.0.1:8084/routes      # active routing rules
+curl http://127.0.0.1:8084/v1/status   # aggregate: ODO + upstream + capabilities
 ```
+
+## CLI — `chimere-cli`
+
+A 200-line bash wrapper (`scripts/chimere-cli`) over ODO and chimere-server. No
+Python dependency; needs only `curl` and `jq`.
+
+```bash
+ln -sf "$PWD/scripts/chimere-cli" "$HOME/.local/bin/chimere-cli"
+chimere-cli status                                 # aggregate /v1/status
+chimere-cli health                                 # both daemons /health
+chimere-cli models | jq .                          # /v1/models
+chimere-cli routes                                 # pipelines
+chimere-cli skills                                 # skills catalog
+chimere-cli skills "debug my kiné protocol"        # match a skill on text
+chimere-cli stats                                  # 24h counters
+chimere-cli chat "capital of France?" --max 32     # one-shot reply
+chimere-cli chat "plan this" --route research      # force a route
+chimere-cli stream "write a haiku"                 # SSE, tokens as they arrive
+chimere-cli chat "hi" --direct                     # bypass ODO, call :8081
+chimere-cli raw GET /stats                         # escape hatch
+```
+
+Environment overrides: `CHIMERE_ODO`, `CHIMERE_SERVER`, `CHIMERE_MODEL`,
+`CHIMERE_USER`, `CHIMERE_TIMEOUT`.
 
 ## Related
 
