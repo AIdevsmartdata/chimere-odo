@@ -39,6 +39,20 @@ import sys
 import time
 import threading
 
+# Security gate (H1 auth, H2 rate limit). Compat: no-op if ODO_AUTH_TOKEN unset.
+try:
+    from security_gate import (
+        check_auth as _sg_check_auth,
+        rate_limit as _sg_rate_limit,
+        uid_from_headers as _sg_uid,
+        auth_enabled as _sg_auth_enabled,
+    )
+    _SECGATE_OK = True
+except Exception as _sg_e:  # pragma: no cover
+    print(f"[odo] WARNING: security_gate unavailable ({_sg_e}) — running open",
+          file=sys.stderr, flush=True)
+    _SECGATE_OK = False
+
 # Enable logging for submodules (semantic_fewshot, entropy_router)
 logging.basicConfig(level=logging.INFO, format="[%(name)s] %(message)s")
 from datetime import datetime
@@ -56,58 +70,76 @@ from entropy_router import (estimate_entropy, THRESHOLD_LOW, THRESHOLD_HIGH,
 from quality_gate import (should_score, score_response_async, score_response_sync,
                           reflect_and_retry, on_quality_score)
 from pipeline_executor import execute_pipeline, should_use_pipeline
+# Pre-Act planner (arXiv 2505.09970) — plan-first prompting before heavy routes.
+# Guarded import: if pre_act.py is missing the rest of ODO keeps working.
+try:
+    from pre_act import (
+        run as pre_act_run,
+        inject_plan_into_payload as pre_act_inject,
+        should_pre_act,
+    )
+    _PRE_ACT_OK = True
+except Exception as _pa_e:  # pragma: no cover
+    print(f"[odo] WARNING: pre_act unavailable ({_pa_e}) — plan-first disabled",
+          file=sys.stderr, flush=True)
+    _PRE_ACT_OK = False
+    def should_pre_act(_pipeline: dict) -> bool:  # type: ignore[misc]
+        return False
+    def pre_act_run(*_a, **_kw) -> str:  # type: ignore[misc]
+        return ""
+    def pre_act_inject(payload: dict, _plan: str) -> dict:  # type: ignore[misc]
+        return payload
+
+# Skills loader — Anthropic Agent Skills format scan of ~/.chimere/skills/.
+# Guarded import; OK if skills dir is absent.
+try:
+    from skills_loader import (
+        list_skills_json as _skills_list_json,
+        get_skill_json as _skills_get_json,
+        match_skill_by_trigger as _skills_match_trigger,
+        exec_skill as _skills_exec,
+        get_skill as _skills_get,
+    )
+    _SKILLS_OK = True
+except Exception as _sk_e:  # pragma: no cover
+    print(f"[odo] WARNING: skills_loader unavailable ({_sk_e}) — "
+          f"/skill/* endpoints disabled",
+          file=sys.stderr, flush=True)
+    _SKILLS_OK = False
+
+# XGrammar structured decoding helper (Track C — see xgrammar_helper.py).
+# Used for `response_format: {type: "json_schema"}` and `tool_choice: "required"`
+# (the latter benefits from a tool-union grammar enforced at decode time).
+# Guarded import; OK if the module or the `xgrammar` package is missing.
+try:
+    from xgrammar_helper import (
+        XGRAMMAR_OK,
+        grammar_from_json_schema,
+        grammar_from_tool_defs,
+        ebnf_tool_call_grammar,
+    )
+    _XG_HELPER_OK = True
+except Exception as _xg_e:  # pragma: no cover
+    print(f"[odo] WARNING: xgrammar_helper unavailable ({_xg_e}) — "
+          f"structured decoding via prompt-injection only",
+          file=sys.stderr, flush=True)
+    _XG_HELPER_OK = False
+    XGRAMMAR_OK = False
+    def grammar_from_json_schema(_schema):  # type: ignore[misc]
+        return None
+    def grammar_from_tool_defs(_tools):  # type: ignore[misc]
+        return None
+    def ebnf_tool_call_grammar(_tools):  # type: ignore[misc]
+        return ""
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
 LISTEN_PORT = int(os.environ.get("ODO_PORT", "8084"))
-LISTEN_ADDR = os.environ.get("ODO_LISTEN", "127.0.0.1")
 LLAMA_BASE = os.environ.get("ODO_BACKEND", "http://127.0.0.1:8081")
 FORWARD_TIMEOUT = int(os.environ.get("ODO_TIMEOUT", "300"))
 
 PIPELINES_DIR = Path(__file__).parent / "pipelines"
-_chimere_home = Path(os.environ.get("CHIMERE_HOME", str(Path.home() / ".chimere")))
-DB_PATH = _chimere_home / "logs/odo.db"
-
-# ── SOUL injection ──────────────────────────────────────────────────────────
-
-SOUL_DIR = Path(os.environ.get("SOUL_DIR", str(Path.home() / ".chimere" / "soul")))
-
-_soul_cache: dict[str, tuple[str, float]] = {}  # model_name → (content, mtime)
-
-
-def load_soul(model_name: str = "default") -> str:
-    """Load SOUL.md for a given model/persona.
-
-    Lookup order:
-      1. SOUL_DIR / model_name / SOUL.md
-      2. SOUL_DIR / "default" / SOUL.md
-      3. Empty string (no SOUL injection)
-
-    Caches by file mtime — hot-reloads when the file changes on disk.
-    """
-    candidates = [
-        SOUL_DIR / model_name / "SOUL.md",
-        SOUL_DIR / "default" / "SOUL.md",
-    ]
-    for path in candidates:
-        if not path.is_file():
-            continue
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            continue
-        cache_key = str(path)
-        cached = _soul_cache.get(cache_key)
-        if cached and cached[1] >= mtime:
-            return cached[0]
-        try:
-            content = path.read_text(encoding="utf-8").strip()
-            _soul_cache[cache_key] = (content, mtime)
-            return content
-        except Exception as e:
-            print(f"[odo] WARNING: failed to read {path}: {e}",
-                  file=sys.stderr, flush=True)
-    return ""
+DB_PATH = Path.home() / ".openclaw/logs/odo.db"
 
 # ── Think Router Config ──────────────────────────────────────────────────────
 
@@ -144,7 +176,7 @@ CGRS_TRIGGER_IDS = {
 
 # Training pair logging
 LOG_TRAINING_PAIRS = os.environ.get("LOG_TRAINING_PAIRS", "1") == "1"
-TRAINING_PAIRS_PATH = _chimere_home / "logs" / "training_pairs.jsonl"
+TRAINING_PAIRS_PATH = Path.home() / ".openclaw/logs/training_pairs.jsonl"
 
 THINK_MIN_TOKENS = 4096
 
@@ -248,7 +280,6 @@ GREETING_RE = re.compile(
 
 _pipeline_cache: dict[str, dict] = {}
 _pipeline_mtime: dict[str, float] = {}
-_pipeline_lock = threading.Lock()
 
 
 def _load_yaml(path: Path) -> dict:
@@ -298,19 +329,18 @@ def load_pipeline(route_id: str) -> dict:
     except OSError:
         return {}
 
-    with _pipeline_lock:
-        if route_id in _pipeline_cache and mtime <= _pipeline_mtime.get(route_id, 0):
-            return dict(_pipeline_cache[route_id])
+    if route_id in _pipeline_cache and mtime <= _pipeline_mtime.get(route_id, 0):
+        return dict(_pipeline_cache[route_id])
 
-        try:
-            data = _load_yaml(yaml_path)
-            _pipeline_cache[route_id] = data
-            _pipeline_mtime[route_id] = mtime
-            return dict(data)
-        except Exception as e:
-            print(f"[odo] warning: failed to load {yaml_path}: {e}",
-                  file=sys.stderr, flush=True)
-            return {}
+    try:
+        data = _load_yaml(yaml_path)
+        _pipeline_cache[route_id] = data
+        _pipeline_mtime[route_id] = mtime
+        return dict(data)
+    except Exception as e:
+        print(f"[odo] warning: failed to load {yaml_path}: {e}",
+              file=sys.stderr, flush=True)
+        return {}
 
 
 # ── Message helpers ──────────────────────────────────────────────────────────
@@ -381,6 +411,9 @@ def is_complex_query(text: str) -> bool:
 TOOL_TRIGGER_KEYWORDS = {
     "web_search": ["recherche", "search", "cherche", "trouve", "actualit", "dernier", "récent", "latest"],
     "calculator": ["calcul", "compute", "combien fait", "IMC", "BMI", "pourcentage", "%"],
+    # `think` is always available when the pipeline allows it — no keyword trigger
+    # (the model decides when reasoning benefits from a scratchpad).
+    "think": [],
 }
 
 TOOL_DEFINITIONS = {
@@ -408,11 +441,42 @@ TOOL_DEFINITIONS = {
             },
         },
     },
+    # Anthropic `think` tool: invisible scratchpad for reasoning steps.
+    # Empirical gain: +54% policy adherence on agentic tasks.
+    # Ref: https://www.anthropic.com/engineering/claude-think-tool
+    "think": {
+        "type": "function",
+        "function": {
+            "name": "think",
+            "description": (
+                "Use this tool as a scratchpad to think carefully before "
+                "answering. Write your reasoning, list options, verify "
+                "assumptions. The user will NOT see the thought content, only "
+                "the final response. Call this tool whenever the problem is "
+                "complex or policy-sensitive (clinical reasoning, "
+                "contraindications, research hypotheses, edge cases)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thought": {
+                        "type": "string",
+                        "description": "Your reasoning, 1-5 sentences.",
+                    }
+                },
+                "required": ["thought"],
+            },
+        },
+    },
 }
 
 
 def _should_inject_tools(user_text: str, tools_allowed: list) -> bool:
     """Check if the user's query warrants tool injection."""
+    # `think` is a zero-cost scratchpad — inject whenever the pipeline allows
+    # it, regardless of keywords. The model decides to call it or not.
+    if "think" in tools_allowed:
+        return True
     text_lower = user_text.lower()
     for tool in tools_allowed:
         keywords = TOOL_TRIGGER_KEYWORDS.get(tool, [])
@@ -424,6 +488,356 @@ def _should_inject_tools(user_text: str, tools_allowed: list) -> bool:
 def _build_tool_definitions(tools_allowed: list) -> list:
     """Build OpenAI-format tool definitions for allowed tools."""
     return [TOOL_DEFINITIONS[t] for t in tools_allowed if t in TOOL_DEFINITIONS]
+
+
+# ── OpenAI: response_format (XGrammar structured decoding) ───────────────────
+# OpenAI spec:
+#   response_format: {"type": "text"}                              → default
+#   response_format: {"type": "json_object"}                       → any valid JSON
+#   response_format: {"type": "json_schema",
+#                     "json_schema": {"name": "...", "schema": {...}, "strict": true}}
+#
+# Our behaviour:
+#   1. Extract the JSON Schema (or None for plain json_object).
+#   2. If XGrammar is installed, compile a Grammar for logging; we can't mask at
+#      the backend (chimere-server has no grammar hook), so we fall back to the
+#      prompt-injection + post-hoc-validation strategy.
+#   3. Inject a system-suffix telling the model to ONLY output JSON matching
+#      the schema. Also set a header so downstream can log this.
+#   4. After generation, `_validate_and_repair_json()` extracts JSON from the
+#      content and — if it doesn't parse — runs a single repair round using
+#      the same schema. On repeated failure the response is flagged but still
+#      returned (client receives `odo.structured_error`).
+#
+# Integration points: `_apply_response_format(payload)` runs in the main handler
+# BEFORE forwarding; `_validate_and_repair_json_in_response()` runs in
+# `_buffer_response()` after the backend replies.
+
+def _extract_json_schema(response_format: dict) -> tuple[str | None, dict | None, bool]:
+    """Return (mode, schema_or_none, strict).
+
+    mode: "text" | "json_object" | "json_schema" | None (invalid)
+    """
+    if not isinstance(response_format, dict):
+        return None, None, False
+    rf_type = response_format.get("type")
+    if rf_type == "text":
+        return "text", None, False
+    if rf_type == "json_object":
+        return "json_object", None, False
+    if rf_type == "json_schema":
+        js = response_format.get("json_schema") or {}
+        # OpenAI nests schema in `json_schema.schema`; also accept a flat `schema`
+        # alias for convenience (some clients send it that way).
+        schema = js.get("schema") if isinstance(js, dict) else None
+        if schema is None:
+            schema = response_format.get("schema")
+        strict = bool(js.get("strict", True) if isinstance(js, dict) else True)
+        if not isinstance(schema, dict):
+            return "json_schema", None, strict
+        return "json_schema", schema, strict
+    return None, None, False
+
+
+def _apply_response_format(payload: dict) -> tuple[dict, dict | None]:
+    """Inspect `response_format`, rewrite payload for structured output.
+
+    Returns (new_payload, format_info). `format_info` is stored on the handler
+    so `_buffer_response` can validate and repair JSON after generation.
+
+    Behaviour per mode:
+      - text / missing  : no-op (format_info=None)
+      - json_object     : append a "Reply with a single JSON object, no
+                          prose." system suffix.
+      - json_schema     : append the schema + instruction; try to compile an
+                          XGrammar Grammar (logged only; backend cannot mask).
+    """
+    rf = payload.get("response_format")
+    if not rf:
+        return payload, None
+    mode, schema, strict = _extract_json_schema(rf)
+    if mode is None or mode == "text":
+        return payload, None
+
+    # Build the system-suffix enforcement.
+    if mode == "json_object":
+        suffix = (
+            "\n\n[OUTPUT FORMAT] Reply with a SINGLE valid JSON object. "
+            "Do NOT wrap in markdown fences, prose, or comments. "
+            "The response must parse with `json.loads` on the first try."
+        )
+    else:  # json_schema
+        schema_text = json.dumps(schema, ensure_ascii=False, indent=2) if schema else "{}"
+        suffix = (
+            "\n\n[OUTPUT FORMAT — JSON SCHEMA]\n"
+            "You MUST reply with a SINGLE valid JSON instance matching the "
+            "schema below. No markdown fences, no comments, no prose before "
+            "or after. Parse with `json.loads` on the first try.\n\n"
+            f"SCHEMA:\n{schema_text}"
+        )
+
+    new_payload = dict(payload)
+    msgs = list(new_payload.get("messages", []))
+    if msgs and msgs[0].get("role") == "system":
+        msgs[0] = {**msgs[0], "content": msgs[0].get("content", "") + suffix}
+    else:
+        msgs.insert(0, {"role": "system", "content": suffix.lstrip()})
+    new_payload["messages"] = msgs
+
+    # Remove response_format from the outbound payload (chimere-server does
+    # not know this field and would otherwise 4xx on strict parsing).
+    new_payload.pop("response_format", None)
+
+    # Try to compile an XGrammar Grammar for structured decoding; if available
+    # and a downstream masker is wired, it can be used to constrain tokens.
+    # We stash it in _xgrammar on the payload (local only, never forwarded).
+    compiled = None
+    if mode == "json_schema" and schema and _XG_HELPER_OK:
+        compiled = grammar_from_json_schema(schema)
+        if compiled is not None:
+            # Note: chimere-server does not consume this; kept for observability
+            # and future in-process masking.
+            new_payload["_xgrammar_grammar"] = True  # boolean marker only
+
+    format_info = {
+        "mode": mode,
+        "schema": schema,
+        "strict": strict,
+        "xgrammar_compiled": compiled is not None,
+    }
+    return new_payload, format_info
+
+
+def _strip_code_fences(text: str) -> str:
+    """Strip ```json ... ``` fences if present."""
+    t = text.strip()
+    # Fast path: starts with ``` and ends with ```
+    if t.startswith("```"):
+        first_nl = t.find("\n")
+        if first_nl != -1:
+            body = t[first_nl + 1:]
+            if body.endswith("```"):
+                body = body[: -3]
+            return body.strip()
+    return t
+
+
+def _extract_first_json_object(text: str) -> str | None:
+    """Find the first balanced JSON object or array in `text`.
+
+    Handles strings and escaped quotes inside objects. Returns the substring
+    or None if nothing parses as JSON.
+    """
+    if not text:
+        return None
+    n = len(text)
+    for i, ch in enumerate(text):
+        if ch not in "{[":
+            continue
+        open_ch = ch
+        close_ch = "}" if ch == "{" else "]"
+        depth = 0
+        j = i
+        in_str = False
+        esc = False
+        while j < n:
+            c = text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            else:
+                if c == '"':
+                    in_str = True
+                elif c == open_ch:
+                    depth += 1
+                elif c == close_ch:
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[i: j + 1]
+                        try:
+                            json.loads(candidate)
+                            return candidate
+                        except Exception:
+                            break  # try next opener
+            j += 1
+    return None
+
+
+def _validate_json_payload(content: str, schema: dict | None) -> tuple[bool, str | None, object]:
+    """Return (ok, error_message, parsed_value).
+
+    Runs light schema validation when `jsonschema` is available; otherwise
+    only checks that the content parses as JSON.
+    """
+    body = _strip_code_fences(content)
+    try:
+        parsed = json.loads(body)
+    except Exception as e:
+        # Second chance: find first balanced JSON object in the raw text.
+        found = _extract_first_json_object(content)
+        if found is not None:
+            try:
+                parsed = json.loads(found)
+                body = found
+            except Exception:
+                return False, f"JSON parse failed: {e}", None
+        else:
+            return False, f"JSON parse failed: {e}", None
+
+    if schema is None:
+        return True, None, parsed
+
+    try:
+        import jsonschema  # type: ignore
+        try:
+            jsonschema.validate(parsed, schema)
+            return True, None, parsed
+        except jsonschema.ValidationError as ve:
+            return False, f"schema validation failed: {ve.message}", parsed
+    except ImportError:
+        # jsonschema not installed — accept any parseable JSON (parity with
+        # OpenAI's `json_object` mode). Downstream clients can tighten.
+        return True, None, parsed
+
+
+# ── OpenAI: tool_choice enforcement ──────────────────────────────────────────
+# OpenAI spec:
+#   tool_choice: "auto"       → model decides (default when tools present)
+#   tool_choice: "none"       → model MUST NOT call any tool; strip tools
+#   tool_choice: "required"   → model MUST call at least one tool
+#   tool_choice: {"type": "function", "function": {"name": "..."}}
+#                              → model MUST call exactly that function
+#
+# Qwen3.5 doesn't natively honour tool_choice; we implement via prompt
+# injection + (optionally) grammar masking for "required"/specific name.
+
+def _normalize_tool_choice(tc: object, tools: list | None) -> tuple[str, str | None]:
+    """Return (kind, name) where kind is one of:
+      "auto" | "none" | "required" | "function"
+    and name is the function name when kind == "function".
+    """
+    if tc is None:
+        return ("auto" if tools else "none"), None
+    if isinstance(tc, str):
+        if tc in ("auto", "none", "required"):
+            return tc, None
+        return "auto", None
+    if isinstance(tc, dict):
+        if tc.get("type") == "function":
+            fn = tc.get("function") or {}
+            name = fn.get("name")
+            if name:
+                return "function", name
+    return "auto", None
+
+
+def _apply_tool_choice(payload: dict) -> tuple[dict, dict]:
+    """Rewrite payload to honour `tool_choice` and `parallel_tool_calls`.
+
+    Returns (new_payload, tool_info). `tool_info` is used after generation to
+    verify compliance (e.g. retry when required but no tool was called).
+    """
+    tools = payload.get("tools") or []
+    tc_raw = payload.get("tool_choice")
+    parallel = bool(payload.get("parallel_tool_calls", True))
+    kind, name = _normalize_tool_choice(tc_raw, tools)
+
+    new_payload = dict(payload)
+    # chimere-server doesn't understand these fields; strip to keep the body
+    # clean (kept in tool_info for post-processing / retries).
+    new_payload.pop("tool_choice", None)
+    new_payload.pop("parallel_tool_calls", None)
+
+    tool_info = {
+        "kind": kind,
+        "name": name,
+        "parallel": parallel,
+        "tools_count": len(tools),
+    }
+
+    if kind == "none":
+        # Strip tools entirely and instruct the model to answer naturally.
+        new_payload.pop("tools", None)
+        msgs = list(new_payload.get("messages", []))
+        suffix = (
+            "\n\n[TOOL USE POLICY] Do NOT call any tool. Answer directly in "
+            "natural language even if tools were suggested."
+        )
+        if msgs and msgs[0].get("role") == "system":
+            msgs[0] = {**msgs[0], "content": msgs[0].get("content", "") + suffix}
+        else:
+            msgs.insert(0, {"role": "system", "content": suffix.lstrip()})
+        new_payload["messages"] = msgs
+        return new_payload, tool_info
+
+    if kind == "required" and tools:
+        msgs = list(new_payload.get("messages", []))
+        tool_names = [
+            (t.get("function") or {}).get("name")
+            for t in tools
+            if (t.get("function") or {}).get("name")
+        ]
+        parallel_hint = (
+            "You may call multiple tools in parallel by emitting several "
+            "<tool_call>...</tool_call> blocks in a row."
+            if parallel else
+            "Emit a single <tool_call>...</tool_call> block — parallel calls "
+            "are disabled for this request."
+        )
+        suffix = (
+            "\n\n[TOOL USE POLICY — REQUIRED] You MUST call at least one of "
+            f"the provided tools: {', '.join(tool_names)}. Do NOT answer "
+            f"directly; emit a <tool_call>...</tool_call> block. {parallel_hint}"
+        )
+        if msgs and msgs[0].get("role") == "system":
+            msgs[0] = {**msgs[0], "content": msgs[0].get("content", "") + suffix}
+        else:
+            msgs.insert(0, {"role": "system", "content": suffix.lstrip()})
+        new_payload["messages"] = msgs
+        return new_payload, tool_info
+
+    if kind == "function" and tools and name:
+        # Narrow the advertised tool list to the requested function so the
+        # model can only pick that one, AND add an explicit instruction.
+        filtered = [
+            t for t in tools
+            if (t.get("function") or {}).get("name") == name
+        ]
+        if filtered:
+            new_payload["tools"] = filtered
+        msgs = list(new_payload.get("messages", []))
+        suffix = (
+            f"\n\n[TOOL USE POLICY — SPECIFIC] You MUST call the `{name}` tool "
+            "exactly once. Emit a single <tool_call>...</tool_call> block "
+            f"targeting `{name}`. Do NOT call any other tool and do NOT answer "
+            "directly."
+        )
+        if msgs and msgs[0].get("role") == "system":
+            msgs[0] = {**msgs[0], "content": msgs[0].get("content", "") + suffix}
+        else:
+            msgs.insert(0, {"role": "system", "content": suffix.lstrip()})
+        new_payload["messages"] = msgs
+        return new_payload, tool_info
+
+    # kind == "auto": default behaviour. Still add a parallel hint when tools
+    # are present AND the caller explicitly asked for parallel calls.
+    if tools and parallel:
+        msgs = list(new_payload.get("messages", []))
+        suffix = (
+            "\n\n[TOOL USE] If multiple independent tool calls are useful, "
+            "you MAY emit several <tool_call>...</tool_call> blocks in a row."
+        )
+        if msgs and msgs[0].get("role") == "system":
+            msgs[0] = {**msgs[0], "content": msgs[0].get("content", "") + suffix}
+        else:
+            msgs.insert(0, {"role": "system", "content": suffix.lstrip()})
+        new_payload["messages"] = msgs
+
+    return new_payload, tool_info
 
 
 # ── Pipeline application ────────────────────────────────────────────────────
@@ -622,15 +1036,13 @@ def _send_to_llama(payload: dict, timeout: int = 120) -> dict:
     body = json.dumps(payload).encode()
     parsed = urlparse(LLAMA_BASE)
     conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=timeout)
-    try:
-        conn.request("POST", "/v1/chat/completions", body=body, headers={
-            "Content-Type": "application/json",
-            "Content-Length": str(len(body)),
-        })
-        resp = conn.getresponse()
-        data = json.loads(resp.read())
-    finally:
-        conn.close()
+    conn.request("POST", "/v1/chat/completions", body=body, headers={
+        "Content-Type": "application/json",
+        "Content-Length": str(len(body)),
+    })
+    resp = conn.getresponse()
+    data = json.loads(resp.read())
+    conn.close()
     return data
 
 
@@ -640,6 +1052,86 @@ def _forward_raw(path: str, body: bytes, headers: dict, timeout: int = 300):
     conn.request("POST", path, body=body, headers=headers)
     resp = conn.getresponse()
     return resp, conn
+
+
+# ── Graphiti temporal-memory hook (Agent C P1) ───────────────────────────────
+# Fire-and-forget POST to the MCP server's memory_add_episode tool.
+# Only fires when the pipeline sets `memory_enabled: true`. Failure is silently
+# swallowed — ODO MUST NOT block on memory ingestion.
+
+MCP_URL = os.environ.get("MCP_URL", "http://127.0.0.1:9095")
+MEMORY_HOOK_TIMEOUT = float(os.environ.get("ODO_MEMORY_HOOK_TIMEOUT", "0.8"))
+
+
+def _memory_hook_enabled(pipeline: dict) -> bool:
+    """A pipeline can opt in via top-level `memory_enabled: true`."""
+    if not isinstance(pipeline, dict):
+        return False
+    return bool(pipeline.get("memory_enabled", False))
+
+
+def _memory_add_episode_bg(user_text: str, route_id: str) -> None:
+    """Thread target: POST a short episode to chimere-mcp.
+
+    We talk to the MCP streamable-http endpoint as a plain JSON-RPC "tools/call"
+    request. On any error we log at DEBUG and return. This MUST never raise.
+    """
+    try:
+        if not user_text or len(user_text) < 8:
+            return
+        snippet = user_text[:2000]
+        name = f"dialog:{route_id}:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}"
+        # Minimal JSON-RPC 2.0 tools/call over streamable-http.
+        body = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "memory_add_episode",
+                "arguments": {
+                    "name": name,
+                    "body": snippet,
+                    "source": f"odo/{route_id}",
+                },
+            },
+        }).encode()
+        parsed = urlparse(MCP_URL)
+        conn = http.client.HTTPConnection(
+            parsed.hostname or "127.0.0.1",
+            parsed.port or 9095,
+            timeout=MEMORY_HOOK_TIMEOUT,
+        )
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        conn.request("POST", "/mcp/", body=body, headers=headers)
+        # Drain+close; we don't care about the body
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+    except Exception as e:  # pragma: no cover
+        # DEBUG only — memory hook must never perturb generation.
+        try:
+            log_msg = f"[odo] memory hook skipped: {e}"
+            print(log_msg, file=sys.stderr, flush=True)
+        except Exception:
+            pass
+
+
+def _trigger_memory_hook(pipeline: dict, user_text: str, route_id: str) -> None:
+    """Fire-and-forget thread if pipeline opts in."""
+    if not _memory_hook_enabled(pipeline):
+        return
+    try:
+        t = threading.Thread(
+            target=_memory_add_episode_bg,
+            args=(user_text, route_id),
+            daemon=True,
+        )
+        t.start()
+    except Exception:
+        pass
 
 
 # ── Handler ──────────────────────────────────────────────────────────────────
@@ -663,14 +1155,115 @@ class ODOHandler(BaseHTTPRequestHandler):
             self._send_stats()
         elif self.path == "/routes":
             self._json_response(200, {"routes": self._list_routes()})
+        elif self.path == "/skill/list":
+            # Anthropic Agent Skills catalog — scan of ~/.chimere/skills/.
+            if not _SKILLS_OK:
+                self._json_response(503, {"error": "skills_loader unavailable"})
+            else:
+                try:
+                    self._json_response(200, _skills_list_json())
+                except Exception as e:
+                    self._json_response(500, {"error": f"list failed: {e}"})
+        elif self.path.startswith("/skill/get/"):
+            if not _SKILLS_OK:
+                self._json_response(503, {"error": "skills_loader unavailable"})
+            else:
+                name = self.path[len("/skill/get/"):].strip("/ ")
+                payload = _skills_get_json(name) if name else None
+                if payload is None:
+                    self._json_response(404, {"error": f"skill not found: {name}"})
+                else:
+                    self._json_response(200, payload)
+        elif self.path.startswith("/skill/match"):
+            # /skill/match?text=...
+            if not _SKILLS_OK:
+                self._json_response(503, {"error": "skills_loader unavailable"})
+            else:
+                from urllib.parse import urlparse as _u, parse_qs as _q
+                p = _u(self.path)
+                q = _q(p.query or "")
+                text = (q.get("text") or q.get("q") or [""])[0]
+                matches = _skills_match_trigger(text)
+                self._json_response(200, {
+                    "query": text,
+                    "matches": [m.get("name") for m in matches],
+                })
         elif self.path.startswith("/v1/models"):
-            self._proxy_get()
+            # chimere-server does not expose /v1/models; synthesize an
+            # OpenAI-compatible list so Open WebUI / other clients can enumerate.
+            self._json_response(200, {
+                "object": "list",
+                "data": [
+                    {
+                        "id": "chimere-deltanet",
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "odo",
+                    },
+                    {
+                        "id": "chimere",
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "odo",
+                    },
+                ],
+            })
         else:
             self.send_error(404)
 
     def do_POST(self):
+        # ── Security gate (H1 auth, H2 rate limit) ──
+        if _SECGATE_OK:
+            if not _sg_check_auth(self.headers):
+                self.send_error(401, "unauthorized")
+                return
+            uid = _sg_uid(self.headers)
+            if not _sg_rate_limit(uid):
+                self.send_error(429, "rate limit exceeded")
+                return
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
+
+        # ── C4 canary: forward-propagate x-prm-canary header (case-insensitive)
+        # to the quality scorer so a single request can force ThinkPRM-primary
+        # even when global THINKPRM_SHADOW=1. ───────────────────────────────
+        self._prm_canary = False
+        for k in list(self.headers.keys()):
+            if k.lower() == "x-prm-canary" and self.headers[k].strip() in ("1", "true", "yes"):
+                self._prm_canary = True
+                break
+
+        # ── Skill invocation endpoint: POST /skill/invoke/<name> ──
+        # Body: {"args": "...", "timeout_ms": <optional int>} OR raw string.
+        if self.path.startswith("/skill/invoke/"):
+            if not _SKILLS_OK:
+                self._json_response(503, {"error": "skills_loader unavailable"})
+                return
+            name = self.path[len("/skill/invoke/"):].strip("/ ")
+            sk = _skills_get(name) if name else None
+            if not sk:
+                self._json_response(404, {"error": f"skill not found: {name}"})
+                return
+            # Parse args from JSON body or fall back to raw body
+            args_str = ""
+            timeout_override = None
+            try:
+                if body:
+                    parsed = json.loads(body)
+                    if isinstance(parsed, dict):
+                        args_str = str(parsed.get("args") or "")
+                        timeout_override = parsed.get("timeout_ms")
+                    else:
+                        args_str = str(parsed)
+            except Exception:
+                try:
+                    args_str = body.decode("utf-8", errors="replace")
+                except Exception:
+                    args_str = ""
+            result = _skills_exec(sk, args_str, timeout_override=timeout_override)
+            status = 200 if result.get("ok") else 500
+            self._json_response(status, {"skill": name, **result})
+            return
 
         # Non-chat endpoints: transparent proxy
         if not self.path.startswith("/v1/chat/completions"):
@@ -689,18 +1282,24 @@ class ODOHandler(BaseHTTPRequestHandler):
         if "messages" in payload:
             payload["messages"] = sanitize_messages(payload["messages"])
 
-        # ── 1b. SOUL injection ──
-        # Inject SOUL.md content as prefix to the system message.
-        # Model name can be passed via odo_metadata or defaults to "default".
-        soul_model = payload.get("odo_metadata", {}).get("soul", "default")
-        soul_content = load_soul(soul_model)
-        if soul_content and "messages" in payload:
-            msgs = payload["messages"]
-            if msgs and msgs[0].get("role") == "system":
-                existing = msgs[0].get("content", "")
-                msgs[0]["content"] = f"{soul_content}\n\n{existing}" if existing else soul_content
-            else:
-                msgs.insert(0, {"role": "system", "content": soul_content})
+        # ── 1b. OpenAI structured output + tool_choice preprocessing ──
+        # `response_format` → prompt-injected schema + (later) JSON repair.
+        # `tool_choice`     → policy enforcement (auto/none/required/specific).
+        # Both run before classification so the injected system suffixes are
+        # part of the prompt that gets routed & enriched.
+        payload, self._response_format_info = _apply_response_format(payload)
+        payload, self._tool_info = _apply_tool_choice(payload)
+        if self._response_format_info:
+            print(f"[odo] response_format: mode={self._response_format_info['mode']} "
+                  f"strict={self._response_format_info['strict']} "
+                  f"xgrammar={self._response_format_info['xgrammar_compiled']}",
+                  file=sys.stderr, flush=True)
+        if self._tool_info.get("kind") != "auto" or self._tool_info.get("tools_count"):
+            print(f"[odo] tool_choice: kind={self._tool_info['kind']} "
+                  f"name={self._tool_info.get('name')} "
+                  f"parallel={self._tool_info['parallel']} "
+                  f"tools={self._tool_info['tools_count']}",
+                  file=sys.stderr, flush=True)
 
         user_text = extract_user_text(payload)
         has_img = has_image(payload)
@@ -720,6 +1319,11 @@ class ODOHandler(BaseHTTPRequestHandler):
         pipeline = load_pipeline(route_id)
         if not pipeline:
             pipeline = load_pipeline("default")
+
+        # ── 3a. Temporal memory hook (Graphiti via MCP) ──
+        # Fire-and-forget: only fires when pipeline sets `memory_enabled: true`.
+        # Failure is silently swallowed; never blocks generation.
+        _trigger_memory_hook(pipeline, user_text, route_id)
 
         # ── 3b. Generation mode (fast / quality / ultra) ──
         gen_mode = payload.pop("mode", "fast")
@@ -781,6 +1385,33 @@ class ODOHandler(BaseHTTPRequestHandler):
 
         classify_ms = int((time.time() - t0) * 1000)
 
+        # ── 4.1 PRE-ACT PLANNER — plan-first prompting (arXiv 2505.09970) ──
+        # Only runs when `pre_act.enabled: true` in the pipeline YAML. Generates
+        # a short numbered plan in no-think mode, then prepends it to the
+        # system prompt. Net cost: +300-800ms; gain: +7pp task completion on
+        # policy-heavy benchmarks vs vanilla ReAct.
+        pre_act_plan_text = ""
+        if _PRE_ACT_OK and should_pre_act(pipeline) and len(user_text) >= 12:
+            t_pa = time.time()
+            pre_act_plan_text = pre_act_run(
+                user_text,
+                pipeline,
+                system_prompt=pipeline.get("system_prompt", ""),
+            )
+            pa_ms = int((time.time() - t_pa) * 1000)
+            if pre_act_plan_text:
+                payload = pre_act_inject(payload, pre_act_plan_text)
+                n_lines = sum(1 for line in pre_act_plan_text.splitlines() if line.strip())
+                print(
+                    f"[odo] pre_act: route={route_id} steps={n_lines} {pa_ms}ms",
+                    file=sys.stderr, flush=True,
+                )
+            else:
+                print(
+                    f"[odo] pre_act: route={route_id} SKIPPED (no plan) {pa_ms}ms",
+                    file=sys.stderr, flush=True,
+                )
+
         # ── 4b. ENRICH — inject context from tools (RAG, web, CSV, IoC) ──
         # IMPORTANT: enrichment BEFORE tool injection (tool injection was blocking enrichment)
         enrich_info = {"tools_used": [], "enrich_ms": 0, "context_chars": 0}
@@ -812,6 +1443,12 @@ class ODOHandler(BaseHTTPRequestHandler):
         if should_use_pipeline(pipeline, payload):
             steps = pipeline["pipeline"]
             system_prompt = pipeline.get("system_prompt", "")
+            # Pre-Act: append the plan to every pipeline step's system context.
+            if pre_act_plan_text:
+                system_prompt = (
+                    f"{system_prompt.rstrip()}\n\n"
+                    f"[Pre-Act plan — follow these steps]\n{pre_act_plan_text}"
+                )
             think_override = pipeline_thinking_override(pipeline)
             thinking = think_override if think_override is not None else (FORCE_THINK or True)
 
@@ -1025,17 +1662,14 @@ class ODOHandler(BaseHTTPRequestHandler):
             else:
                 real_payload[k] = v
 
-        # Remove internal fields (not understood by llama-server)
+        # Remove internal fields
         real_payload.pop("odo_metadata", None)
         real_payload.pop("odo_route", None)
-        for internal_key in ("engram_table", "engram_alpha", "lora"):
-            real_payload.pop(internal_key, None)
 
         # ABF for complex thinking queries
         budget_retries = 0
         complex_q = is_complex_query(user_text)
-        _pab = pipeline_abf_threshold(pipeline)
-        abf_threshold = _pab if _pab is not None else ABF_THRESHOLD
+        abf_threshold = pipeline_abf_threshold(pipeline) or ABF_THRESHOLD
         needs_abf = (ABF_ENABLED and is_thinking and complex_q and len(user_text) > 30)
 
         # DVTS: Diverse Verifier Tree Search (generate K candidates, score, return best)
@@ -1161,7 +1795,7 @@ class ODOHandler(BaseHTTPRequestHandler):
 
     def _abf_monitor(self, payload, user_text, threshold=None):
         """ABF inline monitor: stream internally, compute Ct, retry if needed."""
-        threshold = threshold if threshold is not None else ABF_THRESHOLD
+        threshold = threshold or ABF_THRESHOLD
         work_payload = dict(payload)
         work_payload["stream"] = True
         work_payload["logprobs"] = True
@@ -1217,11 +1851,6 @@ class ODOHandler(BaseHTTPRequestHandler):
 
             ct = compute_abf_certainty(logprob_entries) if logprob_entries else 0.0
 
-            # CGRS: suppress redundant reasoning when certainty is very high
-            # Must be checked BEFORE acceptance to apply logit_bias on the retry
-            if CGRS_ENABLED and ct > CGRS_DELTA:
-                work_payload["logit_bias"] = CGRS_TRIGGER_IDS
-
             accepted = False
             if ct >= threshold and reasoning_len >= ABF_MIN_THINKING_CHARS:
                 accepted = True
@@ -1252,6 +1881,9 @@ class ODOHandler(BaseHTTPRequestHandler):
             prefill = f"<think>\n{reasoning_text}\nWait, let me reconsider this step by step.\n"
             messages.append({"role": "assistant", "content": prefill})
             work_payload["messages"] = messages
+
+            if CGRS_ENABLED and ct > CGRS_DELTA:
+                work_payload["logit_bias"] = CGRS_TRIGGER_IDS
 
         return {
             "choices": [{"message": {"role": "assistant", "content": "".join(content_buf)},
@@ -1367,7 +1999,8 @@ class ODOHandler(BaseHTTPRequestHandler):
                 if (user_text and content_text and route_id
                         and should_score(route_id, content_text, False)):
                     score_response_async(user_text, content_text, route_id,
-                                         callback=on_quality_score)
+                                         callback=on_quality_score,
+                                         prm_canary=getattr(self, "_prm_canary", False))
             except Exception as e:
                 print(f"[odo] stream post-process error: {e}",
                       file=sys.stderr, flush=True)
@@ -1395,16 +2028,94 @@ class ODOHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+        # ── response_format JSON validation / repair ──
+        # If the client asked for json_object or json_schema, parse and — when
+        # possible — normalise the content to a clean JSON string; record any
+        # validation error under `odo.structured_error`.
+        rf_info = getattr(self, "_response_format_info", None)
+        structured_error: str | None = None
+        if rf_info:
+            try:
+                data = json.loads(resp_body)
+                if "choices" in data and data["choices"]:
+                    msg = data["choices"][0].get("message", {})
+                    content = msg.get("content", "") or ""
+                    schema = rf_info.get("schema")
+                    ok, err, parsed = _validate_json_payload(content, schema)
+                    if ok:
+                        # Re-serialize to canonical JSON (no fences, no prose).
+                        clean = json.dumps(parsed, ensure_ascii=False)
+                        msg["content"] = clean
+                    else:
+                        structured_error = err
+                        print(f"[odo] response_format validation failed: {err}",
+                              file=sys.stderr, flush=True)
+                    data["choices"][0]["message"] = msg
+                    resp_body = json.dumps(data).encode()
+            except Exception as e:
+                print(f"[odo] response_format post-processing error: {e}",
+                      file=sys.stderr, flush=True)
+
+        # ── tool_choice compliance ──
+        # When `tool_choice=required` or a specific function was requested but
+        # the model produced no matching tool_calls, flag it. We do NOT retry
+        # automatically here — the caller typically wants fast feedback — but
+        # we surface the non-compliance in the `odo.tool_choice_error` field.
+        ti = getattr(self, "_tool_info", None)
+        tool_choice_error: str | None = None
+        if ti and ti.get("kind") in ("required", "function"):
+            try:
+                data = json.loads(resp_body)
+                if "choices" in data and data["choices"]:
+                    msg = data["choices"][0].get("message", {})
+                    tcs = msg.get("tool_calls") or []
+                    if not tcs:
+                        tool_choice_error = (
+                            f"no tool_calls emitted but tool_choice={ti['kind']}"
+                        )
+                    elif ti["kind"] == "function":
+                        want = ti.get("name")
+                        got_names = [
+                            (tc.get("function") or {}).get("name") for tc in tcs
+                        ]
+                        if want not in got_names:
+                            tool_choice_error = (
+                                f"tool_choice=function '{want}' requested but "
+                                f"got {got_names}"
+                            )
+                if tool_choice_error:
+                    print(f"[odo] tool_choice non-compliance: {tool_choice_error}",
+                          file=sys.stderr, flush=True)
+            except Exception:
+                pass
+
         # Inject ODO metadata into response (confidence surfacing)
         try:
             data = json.loads(resp_body)
             # Only if it's a valid chat completion response
             if "choices" in data:
                 data["x_odo_route"] = route_id
-                data["odo"] = {
+                odo_meta = {
                     "route": route_id,
                     "enriched": bool(route_id),  # enrichment happened
                 }
+                if rf_info:
+                    odo_meta["response_format"] = {
+                        "mode": rf_info["mode"],
+                        "strict": rf_info["strict"],
+                        "xgrammar": rf_info["xgrammar_compiled"],
+                    }
+                    if structured_error:
+                        odo_meta["structured_error"] = structured_error
+                if ti and ti.get("tools_count"):
+                    odo_meta["tool_choice"] = {
+                        "kind": ti["kind"],
+                        "name": ti.get("name"),
+                        "parallel": ti["parallel"],
+                    }
+                    if tool_choice_error:
+                        odo_meta["tool_choice_error"] = tool_choice_error
+                data["odo"] = odo_meta
             resp_body = json.dumps(data).encode()
         except Exception:
             pass
@@ -1457,7 +2168,8 @@ class ODOHandler(BaseHTTPRequestHandler):
         if (route_id and route_id not in REFLECT_ROUTES and user_text
                 and should_score(route_id, response_content, False)):
             score_response_async(user_text, response_content, route_id,
-                                 callback=on_quality_score)
+                                 callback=on_quality_score,
+                                 prm_canary=getattr(self, "_prm_canary", False))
 
     def _proxy_post(self, body):
         try:
@@ -1595,11 +2307,10 @@ def main():
     init_db()
     PIPELINES_DIR.mkdir(parents=True, exist_ok=True)
 
-    server = ThreadedHTTPServer((LISTEN_ADDR, LISTEN_PORT), ODOHandler)
+    server = ThreadedHTTPServer(("127.0.0.1", LISTEN_PORT), ODOHandler)
     n_pipelines = len(list(PIPELINES_DIR.glob("*.yaml")))
 
-    soul_status = f"soul_dir={SOUL_DIR} ({'found' if SOUL_DIR.is_dir() else 'missing'})"
-    print(f"[odo] listening on {LISTEN_ADDR}:{LISTEN_PORT}", flush=True)
+    print(f"[odo] listening on 127.0.0.1:{LISTEN_PORT}", flush=True)
     print(f"[odo] backend: {LLAMA_BASE}", flush=True)
     print(f"[odo] pipelines: {n_pipelines} loaded from {PIPELINES_DIR}", flush=True)
     print(f"[odo] force_think: {FORCE_THINK}", flush=True)
@@ -1611,9 +2322,18 @@ def main():
     print(f"[odo] entropy_router: thresholds low<={THRESHOLD_LOW} high>={THRESHOLD_HIGH} "
           f"weights cx={W_COMPLEXITY} cf={W_CONFIDENCE} hx={W_HISTORY}", flush=True)
     print(f"[odo] training logging: {LOG_TRAINING_PAIRS} → {TRAINING_PAIRS_PATH}", flush=True)
-    print(f"[odo] {soul_status}", flush=True)
     print(f"[odo] stats: curl http://127.0.0.1:{LISTEN_PORT}/stats", flush=True)
     print(f"[odo] routes: curl http://127.0.0.1:{LISTEN_PORT}/routes", flush=True)
+    # Skills (Anthropic Agent Skills format scan of ~/.chimere/skills/)
+    if _SKILLS_OK:
+        try:
+            n_skills = len(_skills_list_json().get("skills", []))
+            print(f"[odo] skills: {n_skills} loaded from ~/.chimere/skills "
+                  f"(GET /skill/list, POST /skill/invoke/<name>)", flush=True)
+        except Exception as _ske:
+            print(f"[odo] skills: loader error ({_ske})", flush=True)
+    else:
+        print("[odo] skills: disabled (loader unavailable)", flush=True)
 
     # Warmup semantic few-shot FAISS index (background, non-blocking)
     try:
